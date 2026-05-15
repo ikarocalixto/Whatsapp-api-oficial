@@ -4,8 +4,15 @@ const axios = require("axios");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const path = require("path");
+const fs = require("fs");
 
-dotenv.config({ path: path.resolve(__dirname, "../.env") });
+const envCandidates = [
+  path.resolve(__dirname, ".env"),
+  path.resolve(__dirname, "../.env"),
+];
+const resolvedEnvPath = envCandidates.find((candidate) => fs.existsSync(candidate));
+
+dotenv.config(resolvedEnvPath ? { path: resolvedEnvPath } : undefined);
 
 const app = express();
 const port = process.env.WHATSAPP_OFFICIAL_PORT || 3010;
