@@ -1,0 +1,1571 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Inove WhatsApp Cloud Console</title>
+    <style>
+      :root {
+        --bg: #08111f;
+        --bg-soft: #0f1b31;
+        --panel: rgba(10, 18, 34, 0.84);
+        --panel-strong: rgba(8, 14, 27, 0.96);
+        --line: rgba(146, 177, 218, 0.18);
+        --line-strong: rgba(146, 177, 218, 0.3);
+        --text: #e7eefb;
+        --muted: #9db0cf;
+        --accent: #19c37d;
+        --accent-strong: #13a86a;
+        --accent-soft: rgba(25, 195, 125, 0.14);
+        --gold: #f6c35b;
+        --danger: #ff7b8c;
+        --danger-soft: rgba(255, 123, 140, 0.16);
+        --info: #5db7ff;
+        --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+        --radius: 24px;
+        --radius-sm: 16px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(25, 195, 125, 0.18), transparent 24%),
+          radial-gradient(circle at top right, rgba(93, 183, 255, 0.16), transparent 22%),
+          linear-gradient(180deg, #08111f 0%, #091627 45%, #060c16 100%);
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image:
+          linear-gradient(rgba(157, 176, 207, 0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(157, 176, 207, 0.03) 1px, transparent 1px);
+        background-size: 36px 36px;
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 92%);
+      }
+
+      .page {
+        max-width: 1440px;
+        margin: 0 auto;
+        padding: 28px 20px 56px;
+      }
+
+      .hero {
+        position: relative;
+        overflow: hidden;
+        margin-bottom: 22px;
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-radius: 32px;
+        background:
+          linear-gradient(135deg, rgba(25, 195, 125, 0.16), rgba(93, 183, 255, 0.09)),
+          rgba(8, 14, 27, 0.84);
+        box-shadow: var(--shadow);
+      }
+
+      .hero::after {
+        content: "";
+        position: absolute;
+        width: 340px;
+        height: 340px;
+        right: -90px;
+        top: -140px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(246, 195, 91, 0.2), transparent 70%);
+      }
+
+      .hero-grid {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: 1.25fr 0.75fr;
+        gap: 20px;
+        align-items: end;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: #bbf7d0;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        max-width: 720px;
+        margin-top: 14px;
+        font-size: clamp(34px, 6vw, 68px);
+        line-height: 0.96;
+        letter-spacing: -0.04em;
+      }
+
+      .subtitle {
+        max-width: 760px;
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1.65;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 22px;
+      }
+
+      .hero-note {
+        display: grid;
+        gap: 14px;
+        padding: 20px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .hero-note strong {
+        font-size: 15px;
+      }
+
+      .hero-note ul {
+        margin: 0;
+        padding-left: 18px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+        margin-bottom: 22px;
+      }
+
+      .stat-card,
+      .panel,
+      .library-card,
+      .log-card {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(20px);
+      }
+
+      .stat-card {
+        padding: 18px 18px 16px;
+      }
+
+      .stat-label {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+
+      .stat-value {
+        margin-top: 10px;
+        font-size: 30px;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+      }
+
+      .stat-subtext {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1.08fr 0.92fr;
+        gap: 20px;
+      }
+
+      .stack {
+        display: grid;
+        gap: 20px;
+      }
+
+      .panel {
+        overflow: hidden;
+      }
+
+      .panel-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        align-items: start;
+        padding: 22px 22px 0;
+      }
+
+      .panel-title {
+        font-size: 24px;
+        letter-spacing: -0.03em;
+      }
+
+      .panel-subtitle {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      .panel-body {
+        padding: 22px;
+      }
+
+      .form {
+        display: grid;
+        gap: 14px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+
+      .row-tight {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 14px;
+      }
+
+      label {
+        display: grid;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      input,
+      textarea,
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 14px 15px;
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        font: inherit;
+        transition:
+          border-color 0.18s ease,
+          transform 0.18s ease,
+          box-shadow 0.18s ease;
+      }
+
+      input::placeholder,
+      textarea::placeholder {
+        color: rgba(157, 176, 207, 0.7);
+      }
+
+      input:focus,
+      textarea:focus,
+      select:focus {
+        outline: none;
+        border-color: rgba(25, 195, 125, 0.55);
+        box-shadow: 0 0 0 4px rgba(25, 195, 125, 0.12);
+        transform: translateY(-1px);
+      }
+
+      textarea {
+        min-height: 122px;
+        resize: vertical;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 13px 18px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        color: #04130c;
+        font: inherit;
+        font-weight: 800;
+        cursor: pointer;
+        transition:
+          transform 0.18s ease,
+          box-shadow 0.18s ease,
+          filter 0.18s ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.03);
+        box-shadow: 0 14px 24px rgba(25, 195, 125, 0.2);
+      }
+
+      .button-secondary {
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+      }
+
+      .button-secondary:hover {
+        box-shadow: 0 14px 24px rgba(0, 0, 0, 0.18);
+      }
+
+      .button-ghost {
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--line);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 42px;
+        padding: 10px 14px;
+        border: 1px solid rgba(25, 195, 125, 0.18);
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #bbf7d0;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .status-pill.error {
+        border-color: rgba(255, 123, 140, 0.2);
+        background: var(--danger-soft);
+        color: #ffc6cf;
+      }
+
+      .health-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+
+      .mini-card {
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .mini-card strong {
+        display: block;
+        margin-top: 10px;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+      }
+
+      .mini-card span {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .output {
+        margin-top: 14px;
+      }
+
+      pre {
+        margin: 0;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 18px;
+        padding: 16px;
+        background: var(--panel-strong);
+        color: #d8e6ff;
+        overflow: auto;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .helper-text {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .preset-grid,
+      .template-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .preset-card,
+      .template-card {
+        position: relative;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .preset-card button,
+      .template-card button {
+        width: 100%;
+        margin-top: 14px;
+      }
+
+      .preset-card h3,
+      .template-card h3 {
+        font-size: 17px;
+        letter-spacing: -0.02em;
+      }
+
+      .preset-card p,
+      .template-card p {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .template-meta,
+      .preset-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .tag.approved {
+        background: rgba(25, 195, 125, 0.16);
+        color: #bbf7d0;
+      }
+
+      .tag.pending {
+        background: rgba(246, 195, 91, 0.14);
+        color: #f6d992;
+      }
+
+      .tag.rejected {
+        background: rgba(255, 123, 140, 0.16);
+        color: #ffc6cf;
+      }
+
+      .variable-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .variable-button {
+        padding: 9px 12px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        font-size: 12px;
+      }
+
+      .library-toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+
+      .library-count {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .template-select-info {
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .template-select-info strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 14px;
+      }
+
+      .template-select-info p {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .logs {
+        display: grid;
+        gap: 12px;
+        max-height: 980px;
+        overflow: auto;
+      }
+
+      .tracker-grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .tracker-item {
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .tracker-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+
+      .tracker-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .tracker-status.accepted {
+        background: rgba(246, 195, 91, 0.14);
+        color: #f6d992;
+      }
+
+      .tracker-status.sent,
+      .tracker-status.delivered,
+      .tracker-status.read {
+        background: rgba(25, 195, 125, 0.16);
+        color: #bbf7d0;
+      }
+
+      .tracker-status.failed {
+        background: rgba(255, 123, 140, 0.16);
+        color: #ffc6cf;
+      }
+
+      .tracker-meta {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .tracker-warning {
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px solid rgba(246, 195, 91, 0.18);
+        border-radius: 14px;
+        background: rgba(246, 195, 91, 0.08);
+        color: #f6d992;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .tracker-error {
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px solid rgba(255, 123, 140, 0.2);
+        border-radius: 14px;
+        background: rgba(255, 123, 140, 0.1);
+        color: #ffc6cf;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .log-item {
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .log-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+
+      .log-time {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .empty-state {
+        padding: 18px;
+        border: 1px dashed var(--line-strong);
+        border-radius: 18px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      @media (max-width: 1160px) {
+        .hero-grid,
+        .layout,
+        .stats-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 760px) {
+        .page {
+          padding-left: 14px;
+          padding-right: 14px;
+        }
+
+        .hero,
+        .panel-body,
+        .panel-header {
+          padding-left: 18px;
+          padding-right: 18px;
+        }
+
+        .row,
+        .row-tight,
+        .health-grid,
+        .preset-grid,
+        .template-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <div class="eyebrow">Inove SaaS Console</div>
+            <h1>WhatsApp Cloud API com painel de envio e templates de verdade.</h1>
+            <p class="subtitle">
+              Escolha templates aprovados automaticamente, crie novos pedidos de aprovacao, acompanhe
+              status da conta e valide envios sem sair da mesma tela.
+            </p>
+            <div class="hero-actions">
+              <button id="syncAllButton">Sincronizar tudo</button>
+              <button id="scrollTemplatesButton" class="button-secondary">Ir para templates</button>
+              <button id="scrollLogsButton" class="button-ghost">Ver logs</button>
+            </div>
+          </div>
+          <div class="hero-note">
+            <strong>Fluxo recomendado</strong>
+            <ul>
+              <li>Use `Enviar template aprovado` para conversas fora da janela de 24 horas.</li>
+              <li>Os templates aprovados sao carregados automaticamente para voce escolher.</li>
+              <li>Na criacao de template, use os modelos prontos e os botoes `{{1}}`, `{{2}}` para ganhar velocidade.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="stats-grid">
+        <article class="stat-card">
+          <div class="stat-label">Servidor</div>
+          <div id="statServer" class="stat-value">...</div>
+          <div id="statServerDetail" class="stat-subtext">Aguardando leitura do health.</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">Templates Aprovados</div>
+          <div id="statApproved" class="stat-value">0</div>
+          <div id="statApprovedDetail" class="stat-subtext">Sincronize a biblioteca para carregar.</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">Pendentes</div>
+          <div id="statPending" class="stat-value">0</div>
+          <div id="statPendingDetail" class="stat-subtext">Aguardando consulta de revisao.</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">Numero Conectado</div>
+          <div id="statPhone" class="stat-value">-</div>
+          <div id="statPhoneDetail" class="stat-subtext">Cloud API oficial da Meta.</div>
+        </article>
+      </section>
+
+      <section class="layout">
+        <div class="stack">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Status da conta</h2>
+                <p class="panel-subtitle">Leitura do `.env`, numero conectado e status basico do servidor.</p>
+              </div>
+              <div id="healthBadge" class="status-pill">Aguardando health</div>
+            </div>
+            <div class="panel-body">
+              <div class="actions" style="margin-bottom: 14px;">
+                <button id="healthButton" class="button-secondary">Atualizar health</button>
+              </div>
+              <div class="health-grid">
+                <div class="mini-card">
+                  <span>Phone Number ID</span>
+                  <strong id="healthPhoneNumberId">-</strong>
+                </div>
+                <div class="mini-card">
+                  <span>WABA ID</span>
+                  <strong id="healthBusinessAccountId">-</strong>
+                </div>
+                <div class="mini-card">
+                  <span>Numero exibido</span>
+                  <strong id="healthDisplayPhoneNumber">-</strong>
+                </div>
+                <div class="mini-card">
+                  <span>Nome verificado</span>
+                  <strong id="healthVerifiedName">-</strong>
+                </div>
+              </div>
+              <div class="output">
+                <pre id="healthOutput">{}</pre>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Enviar texto livre</h2>
+                <p class="panel-subtitle">Ideal para testes dentro da janela ativa de 24 horas.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <form id="textForm" class="form">
+                <label>
+                  Numero destino
+                  <input name="to" placeholder="5511999999999" required />
+                </label>
+                <label>
+                  Mensagem
+                  <textarea name="body" placeholder="Ola! Este e um teste do console SaaS da Cloud API." required></textarea>
+                </label>
+                <div class="actions">
+                  <button type="submit">Enviar texto</button>
+                </div>
+              </form>
+              <div class="output">
+                <pre id="textOutput">{}</pre>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel" id="template-send-panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Enviar template aprovado</h2>
+                <p class="panel-subtitle">Os templates `APPROVED` aparecem automaticamente aqui para voce escolher.</p>
+              </div>
+              <div class="actions">
+                <button id="refreshApprovedTemplatesButton" type="button" class="button-secondary">Atualizar templates</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <form id="templateForm" class="form">
+                <div class="row">
+                  <label>
+                    Numero destino
+                    <input name="to" placeholder="5511999999999" required />
+                  </label>
+                  <label>
+                    Idioma
+                    <input name="languageCode" value="pt_BR" />
+                  </label>
+                </div>
+                <label>
+                  Template aprovado
+                  <select id="approvedTemplateSelect" name="templateName" required>
+                    <option value="">Carregando templates aprovados...</option>
+                  </select>
+                </label>
+                <div id="approvedTemplateInfo" class="template-select-info">
+                  <strong>Nenhum template selecionado</strong>
+                  <p>Assim que os templates aprovados forem carregados, os detalhes vao aparecer aqui.</p>
+                </div>
+                <label>
+                  Parametros do body
+                  <input
+                    id="templateBodyParametersInput"
+                    name="bodyParameters"
+                    placeholder="Icaro, Pedido 123, amanha"
+                  />
+                </label>
+                <p id="templateParameterHint" class="helper-text">
+                  Se o template tiver variaveis no body, separe os valores por virgula.
+                </p>
+                <div class="actions">
+                  <button type="submit">Enviar template</button>
+                </div>
+              </form>
+              <div class="output">
+                <pre id="templateOutput">{}</pre>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel" id="template-builder-panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Criar template para aprovacao</h2>
+                <p class="panel-subtitle">Monte rapido com modelos prontos, escolha a categoria certa e insira variaveis com um clique.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="preset-grid" id="presetGrid"></div>
+              <form id="templateSubmissionForm" class="form" style="margin-top: 18px;">
+                <div class="row">
+                  <label>
+                    WABA ID
+                    <input
+                      name="wabaId"
+                      placeholder="Se estiver no .env, pode deixar vazio"
+                    />
+                  </label>
+                  <label>
+                    Idioma
+                    <input name="language" value="pt_BR" />
+                  </label>
+                </div>
+                <div class="row">
+                  <label>
+                    Nome interno
+                    <input name="name" placeholder="boas_vindas_cliente" required />
+                  </label>
+                  <label>
+                    Categoria
+                    <select name="category" required>
+                      <option value="UTILITY">UTILITY - atualizacao, confirmacao, suporte</option>
+                      <option value="MARKETING">MARKETING - campanha, oferta, reativacao</option>
+                      <option value="AUTHENTICATION">AUTHENTICATION - codigo, login, verificacao</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  Texto do body
+                  <textarea
+                    id="templateBodyText"
+                    name="bodyText"
+                    placeholder="Ola {{1}}, seu pedido {{2}} foi confirmado."
+                    required
+                  ></textarea>
+                </label>
+                <div class="variable-row">
+                  <button type="button" class="variable-button" data-variable="{{1}}">Inserir {{1}}</button>
+                  <button type="button" class="variable-button" data-variable="{{2}}">Inserir {{2}}</button>
+                  <button type="button" class="variable-button" data-variable="{{3}}">Inserir {{3}}</button>
+                  <button type="button" class="variable-button" data-variable="{{4}}">Inserir {{4}}</button>
+                  <button type="button" class="variable-button" data-variable="{{5}}">Inserir {{5}}</button>
+                </div>
+                <div class="row-tight">
+                  <label>
+                    Exemplos das variaveis
+                    <input name="bodyExamples" placeholder="Icaro, Pedido 123, amanha" />
+                  </label>
+                  <label>
+                    Footer
+                    <input name="footerText" placeholder="Equipe Inove" />
+                  </label>
+                </div>
+                <div class="row">
+                  <label>
+                    Ajuste automatico de categoria
+                    <select name="allowCategoryChange">
+                      <option value="true">Sim</option>
+                      <option value="false">Nao</option>
+                    </select>
+                  </label>
+                  <div class="template-select-info">
+                    <strong>Dica de aprovacao</strong>
+                    <p>Se a mensagem for operacional, prefira `UTILITY`. Se for oferta ou retomada de cliente, use `MARKETING`.</p>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button type="submit">Enviar para aprovacao</button>
+                </div>
+              </form>
+              <div class="output">
+                <pre id="templateSubmitOutput">{}</pre>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="stack">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Biblioteca de templates</h2>
+                <p class="panel-subtitle">Aprovados, pendentes e rejeitados em um painel que ja serve para operacao.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="library-toolbar">
+                <div id="templateLibraryCount" class="library-count">Nenhum template carregado ainda.</div>
+                <form id="templateListForm" class="actions" style="margin: 0;">
+                  <input
+                    name="wabaId"
+                    placeholder="WABA ID opcional"
+                    style="width: 220px;"
+                  />
+                  <button type="submit" class="button-secondary">Sincronizar biblioteca</button>
+                </form>
+              </div>
+              <div id="templateLibraryGrid" class="template-grid"></div>
+              <div class="output">
+                <pre id="templateListOutput">{}</pre>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Rastreamento de entrega</h2>
+                <p class="panel-subtitle">Aqui fica claro se a Meta apenas aceitou ou se a mensagem realmente foi enviada, entregue, lida ou falhou.</p>
+              </div>
+              <div class="actions">
+                <button id="refreshTrackerButton" class="button-secondary" type="button">Atualizar rastreio</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div id="trackerContainer" class="tracker-grid"></div>
+            </div>
+          </article>
+
+          <article class="panel" id="logs-panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Logs operacionais</h2>
+                <p class="panel-subtitle">Webhook, erro, envio e retorno da Meta atualizados automaticamente.</p>
+              </div>
+              <div class="actions">
+                <button id="refreshLogsButton" class="button-secondary" type="button">Atualizar logs</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div id="logsContainer" class="logs"></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const templatePresets = [
+        {
+          key: "welcome_utility",
+          title: "Boas-vindas utilitario",
+          description: "Abre atendimento, onboarding ou contato operacional.",
+          name: "boas_vindas_cliente",
+          category: "UTILITY",
+          bodyText: "Ola {{1}}, seu atendimento com a {{2}} foi iniciado com sucesso.",
+          bodyExamples: ["Icaro", "Inove"],
+          footerText: "Equipe de atendimento",
+        },
+        {
+          key: "order_confirmation",
+          title: "Confirmacao de pedido",
+          description: "Ideal para ecommerce, pedidos e operacao de vendas.",
+          name: "confirmacao_pedido",
+          category: "UTILITY",
+          bodyText: "Ola {{1}}, seu pedido {{2}} foi confirmado. Previsao de envio: {{3}}.",
+          bodyExamples: ["Icaro", "#1234", "amanha"],
+          footerText: "Obrigado pela compra",
+        },
+        {
+          key: "abandoned_cart",
+          title: "Carrinho abandonado",
+          description: "Modelo de retomada comercial com foco em conversao.",
+          name: "carrinho_abandonado",
+          category: "MARKETING",
+          bodyText: "Oi {{1}}, os itens do seu carrinho ainda estao reservados. Finalize agora e aproveite {{2}}.",
+          bodyExamples: ["Icaro", "10% de desconto"],
+          footerText: "Oferta por tempo limitado",
+        },
+        {
+          key: "payment_reminder",
+          title: "Lembrete de pagamento",
+          description: "Mensagem operacional para boleto, pix ou pagamento pendente.",
+          name: "lembrete_pagamento",
+          category: "UTILITY",
+          bodyText: "Ola {{1}}, o pagamento do pedido {{2}} ainda esta pendente. Valor: {{3}}.",
+          bodyExamples: ["Icaro", "#1234", "R$ 49,90"],
+          footerText: "Se precisar, fale com nosso suporte",
+        },
+        {
+          key: "reactivation_marketing",
+          title: "Reativacao de cliente",
+          description: "Campanha para voltar a ativar clientes da base.",
+          name: "reativacao_cliente",
+          category: "MARKETING",
+          bodyText: "Oi {{1}}, sentimos sua falta. Temos uma condicao especial em {{2}} para voce voltar hoje.",
+          bodyExamples: ["Icaro", "perfumes importados"],
+          footerText: "Mensagem promocional",
+        },
+      ];
+
+      const state = {
+        health: null,
+        templates: [],
+      };
+
+      const healthOutput = document.getElementById("healthOutput");
+      const textOutput = document.getElementById("textOutput");
+      const templateOutput = document.getElementById("templateOutput");
+      const templateSubmitOutput = document.getElementById("templateSubmitOutput");
+      const templateListOutput = document.getElementById("templateListOutput");
+      const healthBadge = document.getElementById("healthBadge");
+      const logsContainer = document.getElementById("logsContainer");
+      const approvedTemplateSelect = document.getElementById("approvedTemplateSelect");
+      const approvedTemplateInfo = document.getElementById("approvedTemplateInfo");
+      const templateLibraryGrid = document.getElementById("templateLibraryGrid");
+      const templateLibraryCount = document.getElementById("templateLibraryCount");
+      const templateBodyParametersInput = document.getElementById("templateBodyParametersInput");
+      const templateParameterHint = document.getElementById("templateParameterHint");
+      const trackerContainer = document.getElementById("trackerContainer");
+      const healthPhoneNumberId = document.getElementById("healthPhoneNumberId");
+      const healthBusinessAccountId = document.getElementById("healthBusinessAccountId");
+      const healthDisplayPhoneNumber = document.getElementById("healthDisplayPhoneNumber");
+      const healthVerifiedName = document.getElementById("healthVerifiedName");
+      const appBasePath = window.location.pathname === "/" ? "" : window.location.pathname.replace(/\/$/, "");
+
+      function pretty(data) {
+        return JSON.stringify(data, null, 2);
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      async function requestJson(url, options) {
+        const finalUrl = url.startsWith("http") ? url : `${appBasePath}${url}`;
+        const response = await fetch(finalUrl, options);
+        const text = await response.text();
+
+        let data;
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          data = { raw: text };
+        }
+
+        if (!response.ok) {
+          throw data;
+        }
+
+        return data;
+      }
+
+      function getStatusClass(status) {
+        const normalized = String(status || "").toLowerCase();
+        if (normalized === "approved") return "approved";
+        if (normalized === "pending") return "pending";
+        if (normalized === "rejected") return "rejected";
+        return "";
+      }
+
+      function getTrackerStatusClass(status) {
+        const normalized = String(status || "accepted").toLowerCase();
+        if (["sent", "delivered", "read", "failed", "accepted"].includes(normalized)) {
+          return normalized;
+        }
+        return "accepted";
+      }
+
+      function countBodyVariables(template) {
+        const body = (template.components || []).find((component) => component.type === "BODY");
+        const text = body?.text || "";
+        const matches = text.match(/\{\{\d+\}\}/g);
+        return matches ? matches.length : 0;
+      }
+
+      function getBodyExampleText(template) {
+        const body = (template.components || []).find((component) => component.type === "BODY");
+        const examples = body?.example?.body_text?.[0];
+        return Array.isArray(examples) ? examples.join(", ") : "";
+      }
+
+      function getBodyText(template) {
+        const body = (template.components || []).find((component) => component.type === "BODY");
+        return body?.text || "Sem texto de body.";
+      }
+
+      function renderPresetCards() {
+        const presetGrid = document.getElementById("presetGrid");
+        presetGrid.innerHTML = templatePresets
+          .map(
+            (preset) => `
+              <article class="preset-card">
+                <h3>${escapeHtml(preset.title)}</h3>
+                <p>${escapeHtml(preset.description)}</p>
+                <div class="preset-meta">
+                  <span class="tag">${escapeHtml(preset.category)}</span>
+                  <span class="tag">${escapeHtml(preset.name)}</span>
+                </div>
+                <button type="button" data-preset="${escapeHtml(preset.key)}">Usar este modelo</button>
+              </article>
+            `
+          )
+          .join("");
+
+        presetGrid.querySelectorAll("[data-preset]").forEach((button) => {
+          button.addEventListener("click", () => applyTemplatePreset(button.dataset.preset));
+        });
+      }
+
+      function applyTemplatePreset(presetKey) {
+        const form = document.getElementById("templateSubmissionForm");
+        const preset = templatePresets.find((item) => item.key === presetKey);
+        if (!preset) return;
+
+        form.elements.name.value = preset.name;
+        form.elements.category.value = preset.category;
+        form.elements.bodyText.value = preset.bodyText;
+        form.elements.bodyExamples.value = preset.bodyExamples.join(", ");
+        form.elements.footerText.value = preset.footerText;
+      }
+
+      function insertAtCursor(element, value) {
+        const start = element.selectionStart ?? element.value.length;
+        const end = element.selectionEnd ?? element.value.length;
+        element.value = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+        const caret = start + value.length;
+        element.focus();
+        element.setSelectionRange(caret, caret);
+      }
+
+      function updateStats() {
+        const approved = state.templates.filter((template) => template.status === "APPROVED").length;
+        const pending = state.templates.filter((template) => template.status === "PENDING").length;
+        const serverStatus = state.health?.ok ? "Online" : "Offline";
+        const phoneLabel = state.health?.displayPhoneNumber || state.health?.phoneNumberId || "-";
+
+        document.getElementById("statServer").textContent = serverStatus;
+        document.getElementById("statServerDetail").textContent = state.health?.verifiedName
+          ? `Conta verificada como ${state.health.verifiedName}.`
+          : "Leitura da conta carregada pelo endpoint /health.";
+
+        document.getElementById("statApproved").textContent = String(approved);
+        document.getElementById("statApprovedDetail").textContent = approved
+          ? "Prontos para envio automatico pelo seletor."
+          : "Nenhum template aprovado carregado ainda.";
+
+        document.getElementById("statPending").textContent = String(pending);
+        document.getElementById("statPendingDetail").textContent = pending
+          ? "Existem templates aguardando revisao da Meta."
+          : "Sem templates pendentes no momento.";
+
+        document.getElementById("statPhone").textContent = phoneLabel;
+        document.getElementById("statPhoneDetail").textContent = state.health?.businessAccountId
+          ? `WABA ${state.health.businessAccountId}`
+          : "Adicione o WABA ID no .env para consultas automaticas.";
+      }
+
+      function renderApprovedTemplateSelect() {
+        const approvedTemplates = state.templates.filter((template) => template.status === "APPROVED");
+
+        if (!approvedTemplates.length) {
+          approvedTemplateSelect.innerHTML = '<option value="">Nenhum template aprovado encontrado</option>';
+          approvedTemplateInfo.innerHTML = `
+            <strong>Nenhum template aprovado disponivel</strong>
+            <p>Sincronize a biblioteca ou aprove um template novo para ele aparecer aqui automaticamente.</p>
+          `;
+          templateParameterHint.textContent = "Quando houver template aprovado, a tela mostra as variaveis esperadas e exemplos.";
+          return;
+        }
+
+        approvedTemplateSelect.innerHTML = [
+          '<option value="">Escolha um template aprovado</option>',
+          ...approvedTemplates.map(
+            (template, index) => `
+              <option value="${escapeHtml(template.name)}" ${index === 0 ? "" : ""}>
+                ${escapeHtml(template.name)} - ${escapeHtml(template.category)} - ${escapeHtml(template.language)}
+              </option>
+            `
+          ),
+        ].join("");
+
+        if (!approvedTemplateSelect.value) {
+          approvedTemplateSelect.value = approvedTemplates[0].name;
+        }
+
+        updateSelectedApprovedTemplateInfo();
+      }
+
+      function updateSelectedApprovedTemplateInfo() {
+        const approvedTemplates = state.templates.filter((template) => template.status === "APPROVED");
+        const selected = approvedTemplates.find((template) => template.name === approvedTemplateSelect.value);
+
+        if (!selected) {
+          approvedTemplateInfo.innerHTML = `
+            <strong>Nenhum template selecionado</strong>
+            <p>Escolha um template aprovado para ver as variaveis e a estrutura.</p>
+          `;
+          return;
+        }
+
+        const variableCount = countBodyVariables(selected);
+        const exampleText = getBodyExampleText(selected);
+        const bodyText = getBodyText(selected);
+
+        approvedTemplateInfo.innerHTML = `
+          <strong>${escapeHtml(selected.name)}</strong>
+          <p>${escapeHtml(bodyText)}</p>
+          <div class="template-meta">
+            <span class="tag approved">${escapeHtml(selected.status)}</span>
+            <span class="tag">${escapeHtml(selected.category)}</span>
+            <span class="tag">${escapeHtml(selected.language)}</span>
+            <span class="tag">${variableCount} variaveis</span>
+          </div>
+        `;
+
+        templateBodyParametersInput.placeholder = exampleText || "Ex: Icaro, Pedido 123";
+        templateParameterHint.textContent = variableCount
+          ? `Esse template espera ${variableCount} valor(es) no body. Use virgula para separar.`
+          : "Esse template nao aparenta usar variaveis no body.";
+      }
+
+      function renderTemplateLibrary() {
+        if (!state.templates.length) {
+          templateLibraryGrid.innerHTML = '<div class="empty-state">Nenhum template carregado ainda. Clique em sincronizar biblioteca.</div>';
+          templateLibraryCount.textContent = "Nenhum template carregado ainda.";
+          return;
+        }
+
+        templateLibraryCount.textContent = `${state.templates.length} template(s) encontrados.`;
+
+        templateLibraryGrid.innerHTML = state.templates
+          .map((template) => {
+            const bodyText = getBodyText(template);
+            const variableCount = countBodyVariables(template);
+            return `
+              <article class="template-card">
+                <h3>${escapeHtml(template.name)}</h3>
+                <p>${escapeHtml(bodyText)}</p>
+                <div class="template-meta">
+                  <span class="tag ${getStatusClass(template.status)}">${escapeHtml(template.status)}</span>
+                  <span class="tag">${escapeHtml(template.category)}</span>
+                  <span class="tag">${escapeHtml(template.language)}</span>
+                  <span class="tag">${variableCount} variaveis</span>
+                </div>
+                ${template.status === "APPROVED"
+                  ? `<button type="button" class="button-secondary library-use-template" data-template="${escapeHtml(template.name)}">Usar no envio</button>`
+                  : `<button type="button" class="button-ghost" disabled>Aguardando aprovacao</button>`}
+              </article>
+            `;
+          })
+          .join("");
+
+        templateLibraryGrid.querySelectorAll(".library-use-template").forEach((button) => {
+          button.addEventListener("click", () => {
+            approvedTemplateSelect.value = button.dataset.template;
+            updateSelectedApprovedTemplateInfo();
+            document.getElementById("template-send-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+        });
+      }
+
+      async function loadTracker() {
+        try {
+          const data = await requestJson("/message-tracker");
+          const items = Array.isArray(data.messages) ? data.messages : [];
+
+          if (!items.length) {
+            trackerContainer.innerHTML = '<div class="empty-state">Nenhuma mensagem rastreada ainda. Envie um texto ou template para comecar a acompanhar.</div>';
+            return;
+          }
+
+          trackerContainer.innerHTML = items
+            .map((item) => {
+              const status = String(item.latestStatus || "accepted").toLowerCase();
+              const errorText = Array.isArray(item.errors) && item.errors.length
+                ? item.errors
+                    .map((error) => `${error.code || "sem-codigo"} - ${error.title || error.message || "Erro sem detalhe"}`)
+                    .join(" | ")
+                : "";
+              const waitingWarning =
+                status === "accepted"
+                  ? '<div class="tracker-warning">A Meta aceitou a requisicao, mas ainda nao houve confirmacao final de envio/entrega. Se isso ficar preso assim, o problema costuma estar em publicacao da conta, template, numero destino ou webhook sem retorno final.</div>'
+                  : "";
+              const failedWarning =
+                status === "failed"
+                  ? `<div class="tracker-error">${escapeHtml(errorText || "A mensagem falhou apos a aceitacao inicial. Veja os logs e o webhook para o motivo detalhado.")}</div>`
+                  : "";
+
+              return `
+                <article class="tracker-item">
+                  <div class="tracker-top">
+                    <strong>${escapeHtml(item.templateName || item.type || "message")}</strong>
+                    <span class="tracker-status ${getTrackerStatusClass(status)}">${escapeHtml(status)}</span>
+                  </div>
+                  <div class="tracker-meta">
+                    <span><strong>ID:</strong> ${escapeHtml(item.id || "-")}</span>
+                    <span><strong>Destino:</strong> ${escapeHtml(item.waId || item.to || "-")}</span>
+                    <span><strong>Input:</strong> ${escapeHtml(item.input || "-")}</span>
+                    <span><strong>Aceita em:</strong> ${escapeHtml(item.acceptedAt || "-")}</span>
+                    <span><strong>Ultima atualizacao:</strong> ${escapeHtml(item.updatedAt || "-")}</span>
+                    <span><strong>Webhook final:</strong> ${escapeHtml(item.lastWebhookAt || "ainda nao recebido")}</span>
+                  </div>
+                  ${waitingWarning}
+                  ${failedWarning}
+                </article>
+              `;
+            })
+            .join("");
+        } catch (error) {
+          trackerContainer.innerHTML = `<div class="empty-state">Falha ao carregar rastreamento.<pre>${escapeHtml(pretty(error))}</pre></div>`;
+        }
+      }
+
+      async function loadHealth() {
+        try {
+          const data = await requestJson("/health");
+          state.health = data;
+          healthOutput.textContent = pretty(data);
+          healthBadge.textContent = "Conta pronta";
+          healthBadge.className = "status-pill";
+          healthPhoneNumberId.textContent = data.phoneNumberId || "-";
+          healthBusinessAccountId.textContent = data.businessAccountId || "Nao configurado";
+          healthDisplayPhoneNumber.textContent = data.displayPhoneNumber || "-";
+          healthVerifiedName.textContent = data.verifiedName || "-";
+        } catch (error) {
+          state.health = null;
+          healthOutput.textContent = pretty(error);
+          healthBadge.textContent = "Falha no health";
+          healthBadge.className = "status-pill error";
+          healthPhoneNumberId.textContent = "-";
+          healthBusinessAccountId.textContent = "-";
+          healthDisplayPhoneNumber.textContent = "-";
+          healthVerifiedName.textContent = "-";
+        }
+
+        updateStats();
+      }
+
+      async function loadLogs() {
+        try {
+          const data = await requestJson("/logs");
+          const items = data.logs || [];
+
+          if (!items.length) {
+            logsContainer.innerHTML = '<div class="empty-state">Nenhum log ainda. Assim que houver envio, webhook ou erro, tudo aparece aqui.</div>';
+            return;
+          }
+
+          logsContainer.innerHTML = items
+            .map((log) => {
+              const details = log.details ? `<pre>${escapeHtml(pretty(log.details))}</pre>` : "";
+              return `
+                <article class="log-item">
+                  <div class="log-top">
+                    <span class="tag">${escapeHtml(log.type)}</span>
+                    <span class="log-time">${escapeHtml(log.timestamp)}</span>
+                  </div>
+                  <p class="helper-text" style="margin-bottom: 10px; color: var(--text);">${escapeHtml(log.message)}</p>
+                  ${details}
+                </article>
+              `;
+            })
+            .join("");
+        } catch (error) {
+          logsContainer.innerHTML = `<div class="empty-state">Falha ao carregar logs.<pre>${escapeHtml(pretty(error))}</pre></div>`;
+        }
+      }
+
+      async function loadTemplates(optionalWabaId) {
+        const queryValue =
+          optionalWabaId ||
+          document.querySelector('#templateListForm input[name="wabaId"]').value.trim() ||
+          document.querySelector('#templateSubmissionForm input[name="wabaId"]').value.trim();
+
+        const url = queryValue ? `/message-templates?wabaId=${encodeURIComponent(queryValue)}` : "/message-templates";
+
+        try {
+          const result = await requestJson(url);
+          state.templates = Array.isArray(result.data?.data) ? result.data.data : [];
+          templateListOutput.textContent = pretty(result);
+          renderApprovedTemplateSelect();
+          renderTemplateLibrary();
+        } catch (error) {
+          state.templates = [];
+          templateListOutput.textContent = pretty(error);
+          renderApprovedTemplateSelect();
+          renderTemplateLibrary();
+        }
+
+        updateStats();
+      }
+
+      async function syncAll() {
+        await loadHealth();
+        await loadTemplates();
+        await loadLogs();
+      }
+
+      document.getElementById("healthButton").addEventListener("click", loadHealth);
+      document.getElementById("refreshLogsButton").addEventListener("click", loadLogs);
+      document.getElementById("refreshTrackerButton").addEventListener("click", loadTracker);
+      document.getElementById("refreshApprovedTemplatesButton").addEventListener("click", () => loadTemplates());
+      document.getElementById("syncAllButton").addEventListener("click", syncAll);
+      document.getElementById("scrollTemplatesButton").addEventListener("click", () => {
+        document.getElementById("template-builder-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      document.getElementById("scrollLogsButton").addEventListener("click", () => {
+        document.getElementById("logs-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+
+      document.querySelectorAll(".variable-button").forEach((button) => {
+        button.addEventListener("click", () => {
+          insertAtCursor(document.getElementById("templateBodyText"), button.dataset.variable);
+        });
+      });
+
+      approvedTemplateSelect.addEventListener("change", updateSelectedApprovedTemplateInfo);
+
+      document.getElementById("textForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+
+        try {
+          const data = await requestJson("/send-text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              to: form.get("to"),
+              body: form.get("body"),
+            }),
+          });
+          textOutput.textContent = pretty(data);
+          loadTracker();
+          loadLogs();
+        } catch (error) {
+          textOutput.textContent = pretty(error);
+          loadTracker();
+          loadLogs();
+        }
+      });
+
+      document.getElementById("templateForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        const bodyParameters = String(form.get("bodyParameters") || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+
+        try {
+          const data = await requestJson("/send-template", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              to: form.get("to"),
+              templateName: form.get("templateName"),
+              languageCode: form.get("languageCode"),
+              bodyParameters,
+            }),
+          });
+          templateOutput.textContent = pretty(data);
+          loadTracker();
+          loadLogs();
+        } catch (error) {
+          templateOutput.textContent = pretty(error);
+          loadTracker();
+          loadLogs();
+        }
+      });
+
+      document.getElementById("templateSubmissionForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        const bodyExamples = String(form.get("bodyExamples") || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+
+        try {
+          const data = await requestJson("/submit-template", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              wabaId: String(form.get("wabaId") || "").trim() || undefined,
+              name: form.get("name"),
+              category: form.get("category"),
+              language: form.get("language"),
+              bodyText: form.get("bodyText"),
+              footerText: String(form.get("footerText") || "").trim() || undefined,
+              bodyExamples,
+              allowCategoryChange: String(form.get("allowCategoryChange") || "true").trim() !== "false",
+            }),
+          });
+          templateSubmitOutput.textContent = pretty(data);
+          await loadTemplates(String(form.get("wabaId") || "").trim());
+          loadLogs();
+        } catch (error) {
+          templateSubmitOutput.textContent = pretty(error);
+          loadLogs();
+        }
+      });
+
+      document.getElementById("templateListForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        const wabaId = String(form.get("wabaId") || "").trim();
+        await loadTemplates(wabaId);
+        loadLogs();
+      });
+
+      renderPresetCards();
+      loadHealth();
+      loadTemplates();
+      loadTracker();
+      loadLogs();
+      setInterval(loadTracker, 5000);
+      setInterval(loadLogs, 5000);
+      setInterval(loadTemplates, 12000);
+    </script>
+  </body>
+</html>
