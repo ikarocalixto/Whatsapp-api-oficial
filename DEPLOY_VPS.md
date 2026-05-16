@@ -13,6 +13,12 @@ WHATSAPP_APP_SECRET=seu_app_secret_meta
 WHATSAPP_API_VERSION=v17.0
 WHATSAPP_OFFICIAL_PORT=3010
 WHATSAPP_OFFICIAL_BASE_PATH=/whats
+WHATSAPP_MYSQL_HOST=127.0.0.1
+WHATSAPP_MYSQL_PORT=3306
+WHATSAPP_MYSQL_DATABASE=whatsapp_official
+WHATSAPP_MYSQL_USER=whatsapp_user
+WHATSAPP_MYSQL_PASSWORD=senha_forte
+WHATSAPP_MYSQL_TABLE_PREFIX=wa_
 ```
 
 ## 2. Subir a aplicacao no servidor
@@ -75,3 +81,20 @@ No painel da Meta, em Webhooks/WhatsApp:
 4. Veja a area `Rastreamento de entrega`
 
 Se o webhook estiver configurado certo, a mensagem deve sair de `accepted` e depois virar `sent`, `delivered`, `read` ou `failed`.
+
+## 6. Fila automatica na VPS
+
+Com as variaveis de MySQL preenchidas, o `server.js` passa a:
+
+- gravar jobs agendados em banco
+- processar automaticamente a fila em background
+- persistir status `sent`, `delivered`, `read` e `failed`
+- expor estatisticas em `GET /whats/queue/stats`
+
+Se quiser testar manualmente:
+
+```bash
+curl -X POST https://inovetime.com/whats/queue/process \
+  -H "Content-Type: application/json" \
+  -d "{\"limit\":10}"
+```

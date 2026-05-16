@@ -5,6 +5,13 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const path = require("path");
 const fs = require("fs");
+let mysql = null;
+
+try {
+  mysql = require("mysql2/promise");
+} catch (_error) {
+  mysql = null;
+}
 
 const envCandidates = [
   path.resolve(__dirname, ".env"),
@@ -25,8 +32,17 @@ const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 const verifyToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "troque-esse-token";
 const appSecret = process.env.WHATSAPP_APP_SECRET;
 const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+const mysqlHost = process.env.WHATSAPP_MYSQL_HOST || process.env.MYSQL_HOST || "";
+const mysqlPort = Number(process.env.WHATSAPP_MYSQL_PORT || process.env.MYSQL_PORT || 3306);
+const mysqlDatabase = process.env.WHATSAPP_MYSQL_DATABASE || process.env.MYSQL_DATABASE || "";
+const mysqlUser = process.env.WHATSAPP_MYSQL_USER || process.env.MYSQL_USER || "";
+const mysqlPassword = process.env.WHATSAPP_MYSQL_PASSWORD || process.env.MYSQL_PASSWORD || "";
+const mysqlTablePrefix = process.env.WHATSAPP_MYSQL_TABLE_PREFIX || "wa_";
+const queuePollIntervalMs = Number(process.env.WHATSAPP_QUEUE_POLL_INTERVAL_MS || 15000);
 const logs = [];
 const messageTracker = [];
+let dbPool = null;
+let queueWorkerHandle = null;
 
 const router = express.Router();
 
@@ -65,6 +81,8 @@ function addLog(type, message, details = null) {
   if (logs.length > 200) {
     logs.length = 200;
   }
+
+  void persistRuntimeLog(type, message, details);
 }
 
 function upsertTrackedMessage(entry) {
@@ -87,6 +105,429 @@ function upsertTrackedMessage(entry) {
   if (messageTracker.length > 200) {
     messageTracker.length = 200;
   }
+
+  void persistTrackedMessage(next);
+}
+
+function nowMysql() {
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+
+function isMySqlQueueEnabled() {
+  return Boolean(mysql && mysqlHost && mysqlDatabase && mysqlUser);
+}
+
+function getTableName(name) {
+  return `${mysqlTablePrefix}${name}`;
+}
+
+async function getDbPool() {
+  if (!isMySqlQueueEnabled()) {
+    return null;
+  }
+
+  if (!dbPool) {
+    dbPool = mysql.createPool({
+      host: mysqlHost,
+      port: mysqlPort,
+      database: mysqlDatabase,
+      user: mysqlUser,
+      password: mysqlPassword,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      charset: "utf8mb4",
+    });
+  }
+
+  return dbPool;
+}
+
+async function ensurePersistenceTables() {
+  const pool = await getDbPool();
+  if (!pool) {
+    return false;
+  }
+
+  const queueTable = getTableName("queue_jobs");
+  const trackerTable = getTableName("message_tracker");
+  const logsTable = getTableName("runtime_logs");
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${queueTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      automation_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+      lead_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+      event_name VARCHAR(100) NOT NULL,
+      flow_name VARCHAR(191) DEFAULT NULL,
+      flow_classification TINYINT NOT NULL DEFAULT 2,
+      template_name VARCHAR(191) DEFAULT NULL,
+      template_language VARCHAR(20) DEFAULT 'pt_BR',
+      template_ref_json LONGTEXT NOT NULL,
+      lead_payload_json LONGTEXT NOT NULL,
+      context_payload_json LONGTEXT NULL,
+      automation_meta_json LONGTEXT NULL,
+      scheduled_for DATETIME NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      attempts INT NOT NULL DEFAULT 0,
+      remote_message_id VARCHAR(191) DEFAULT NULL,
+      accepted_status VARCHAR(50) DEFAULT NULL,
+      processed_at DATETIME DEFAULT NULL,
+      last_error TEXT DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_status_schedule (status, scheduled_for),
+      KEY idx_flow (flow_name, flow_classification),
+      KEY idx_remote_message (remote_message_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${trackerTable}\` (
+      id VARCHAR(191) NOT NULL,
+      queue_job_id BIGINT UNSIGNED DEFAULT NULL,
+      recipient_id VARCHAR(50) DEFAULT NULL,
+      latest_status VARCHAR(50) DEFAULT NULL,
+      type VARCHAR(40) DEFAULT NULL,
+      template_name VARCHAR(191) DEFAULT NULL,
+      api_accepted TINYINT(1) NOT NULL DEFAULT 0,
+      accepted_at DATETIME DEFAULT NULL,
+      delivered_at DATETIME DEFAULT NULL,
+      read_at DATETIME DEFAULT NULL,
+      failed_at DATETIME DEFAULT NULL,
+      last_webhook_at DATETIME DEFAULT NULL,
+      conversation_id VARCHAR(191) DEFAULT NULL,
+      pricing_category VARCHAR(50) DEFAULT NULL,
+      pricing_billable TINYINT(1) DEFAULT NULL,
+      wa_id VARCHAR(50) DEFAULT NULL,
+      input_phone VARCHAR(50) DEFAULT NULL,
+      metadata_json LONGTEXT NULL,
+      errors_json LONGTEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_status (latest_status),
+      KEY idx_queue_job (queue_job_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${logsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      type VARCHAR(80) NOT NULL,
+      message VARCHAR(255) NOT NULL,
+      details_json LONGTEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_type_created (type, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  return true;
+}
+
+async function persistRuntimeLog(type, message, details = null) {
+  const pool = await getDbPool();
+  if (!pool) {
+    return;
+  }
+
+  const logsTable = getTableName("runtime_logs");
+  await pool.execute(
+    `INSERT INTO \`${logsTable}\` (type, message, details_json, created_at) VALUES (?, ?, ?, ?)`,
+    [type, message, details ? JSON.stringify(details) : null, nowMysql()]
+  );
+}
+
+async function persistTrackedMessage(entry) {
+  const pool = await getDbPool();
+  if (!pool || !entry?.id) {
+    return;
+  }
+
+  const trackerTable = getTableName("message_tracker");
+  const latestStatus = entry.latestStatus || null;
+  const deliveredAt = latestStatus === "delivered" ? nowMysql() : null;
+  const readAt = latestStatus === "read" ? nowMysql() : null;
+  const failedAt = latestStatus === "failed" ? nowMysql() : null;
+
+  await pool.execute(
+    `INSERT INTO \`${trackerTable}\`
+      (id, queue_job_id, recipient_id, latest_status, type, template_name, api_accepted, accepted_at, delivered_at, read_at, failed_at, last_webhook_at, conversation_id, pricing_category, pricing_billable, wa_id, input_phone, metadata_json, errors_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+      queue_job_id = COALESCE(VALUES(queue_job_id), queue_job_id),
+      recipient_id = COALESCE(VALUES(recipient_id), recipient_id),
+      latest_status = COALESCE(VALUES(latest_status), latest_status),
+      type = COALESCE(VALUES(type), type),
+      template_name = COALESCE(VALUES(template_name), template_name),
+      api_accepted = VALUES(api_accepted),
+      accepted_at = COALESCE(VALUES(accepted_at), accepted_at),
+      delivered_at = COALESCE(VALUES(delivered_at), delivered_at),
+      read_at = COALESCE(VALUES(read_at), read_at),
+      failed_at = COALESCE(VALUES(failed_at), failed_at),
+      last_webhook_at = COALESCE(VALUES(last_webhook_at), last_webhook_at),
+      conversation_id = COALESCE(VALUES(conversation_id), conversation_id),
+      pricing_category = COALESCE(VALUES(pricing_category), pricing_category),
+      pricing_billable = COALESCE(VALUES(pricing_billable), pricing_billable),
+      wa_id = COALESCE(VALUES(wa_id), wa_id),
+      input_phone = COALESCE(VALUES(input_phone), input_phone),
+      metadata_json = COALESCE(VALUES(metadata_json), metadata_json),
+      errors_json = COALESCE(VALUES(errors_json), errors_json)`,
+    [
+      entry.id,
+      entry.queueJobId || null,
+      entry.recipientId || null,
+      latestStatus,
+      entry.type || null,
+      entry.templateName || null,
+      entry.apiAccepted ? 1 : 0,
+      entry.acceptedAt ? String(entry.acceptedAt).slice(0, 19).replace("T", " ") : null,
+      deliveredAt,
+      readAt,
+      failedAt,
+      entry.lastWebhookAt ? String(entry.lastWebhookAt).slice(0, 19).replace("T", " ") : null,
+      entry.conversationId || null,
+      entry.pricingCategory || null,
+      typeof entry.pricingBillable === "boolean" ? (entry.pricingBillable ? 1 : 0) : null,
+      entry.waId || null,
+      entry.input || null,
+      entry.metadata ? JSON.stringify(entry.metadata) : null,
+      entry.errors ? JSON.stringify(entry.errors) : null,
+    ]
+  );
+}
+
+async function queueTemplateJob(job) {
+  const pool = await getDbPool();
+  if (!pool) {
+    throw new Error("Fila MySQL indisponivel. Configure mysql2 e as variaveis de banco.");
+  }
+
+  const queueTable = getTableName("queue_jobs");
+  const [result] = await pool.execute(
+    `INSERT INTO \`${queueTable}\`
+      (automation_id, lead_id, event_name, flow_name, flow_classification, template_name, template_language, template_ref_json, lead_payload_json, context_payload_json, automation_meta_json, scheduled_for, status, attempts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`,
+    [
+      Number(job.automationId || 0),
+      Number(job.leadId || 0),
+      String(job.eventName || ""),
+      job.automationMeta?.flow || null,
+      Number(job.flowClassification || job.automationMeta?.classification || 2),
+      job.templateRef?.name || null,
+      job.templateRef?.language || job.templateLanguage || "pt_BR",
+      JSON.stringify(job.templateRef || {}),
+      JSON.stringify(job.leadPayload || {}),
+      JSON.stringify(job.contextPayload || {}),
+      JSON.stringify(job.automationMeta || {}),
+      job.scheduledFor || nowMysql(),
+    ]
+  );
+
+  return {
+    id: result.insertId,
+    scheduledFor: job.scheduledFor || nowMysql(),
+    status: "pending",
+  };
+}
+
+async function markQueueJobProcessing(jobId, attempts) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  const queueTable = getTableName("queue_jobs");
+  await pool.execute(
+    `UPDATE \`${queueTable}\` SET status = 'processing', attempts = ?, last_error = NULL WHERE id = ?`,
+    [attempts, jobId]
+  );
+}
+
+async function markQueueJobResult(jobId, patch) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  const queueTable = getTableName("queue_jobs");
+  await pool.execute(
+    `UPDATE \`${queueTable}\`
+        SET status = ?, remote_message_id = ?, accepted_status = ?, processed_at = ?, last_error = ?
+      WHERE id = ?`,
+    [
+      patch.status || "sent",
+      patch.remoteMessageId || null,
+      patch.acceptedStatus || null,
+      patch.processedAt || nowMysql(),
+      patch.lastError || null,
+      jobId,
+    ]
+  );
+}
+
+async function fetchDueQueueJobs(limit = 20) {
+  const pool = await getDbPool();
+  if (!pool) {
+    return [];
+  }
+
+  const queueTable = getTableName("queue_jobs");
+  const [rows] = await pool.execute(
+    `SELECT * FROM \`${queueTable}\`
+      WHERE status IN ('pending', 'retry') AND scheduled_for <= NOW()
+      ORDER BY scheduled_for ASC, id ASC
+      LIMIT ?`,
+    [Number(limit)]
+  );
+  return rows;
+}
+
+async function fetchQueueStats() {
+  const pool = await getDbPool();
+  if (!pool) {
+    return {
+      pending: 0,
+      processing: 0,
+      sent: 0,
+      failed: 0,
+      retry: 0,
+      delivered: 0,
+      read: 0,
+      queued: 0,
+    };
+  }
+
+  const queueTable = getTableName("queue_jobs");
+  const trackerTable = getTableName("message_tracker");
+  const [queueRows] = await pool.query(`SELECT status, COUNT(*) total FROM \`${queueTable}\` GROUP BY status`);
+  const [trackerRows] = await pool.query(`SELECT latest_status, COUNT(*) total FROM \`${trackerTable}\` WHERE queue_job_id IS NOT NULL GROUP BY latest_status`);
+
+  const stats = {
+    pending: 0,
+    processing: 0,
+    sent: 0,
+    failed: 0,
+    retry: 0,
+    delivered: 0,
+    read: 0,
+    queued: 0,
+  };
+
+  for (const row of queueRows) {
+    const status = String(row.status || "");
+    if (Object.prototype.hasOwnProperty.call(stats, status)) {
+      stats[status] = Number(row.total || 0);
+    }
+    stats.queued += Number(row.total || 0);
+  }
+
+  for (const row of trackerRows) {
+    const status = String(row.latest_status || "");
+    if (status === "delivered") stats.delivered = Number(row.total || 0);
+    if (status === "read") stats.read = Number(row.total || 0);
+  }
+
+  return stats;
+}
+
+async function processQueueJobs(limit = 20) {
+  const jobs = await fetchDueQueueJobs(limit);
+  let processed = 0;
+  let sent = 0;
+  let failed = 0;
+
+  for (const job of jobs) {
+    processed += 1;
+    const attempts = Number(job.attempts || 0) + 1;
+    await markQueueJobProcessing(job.id, attempts);
+
+    try {
+      const templateRef = JSON.parse(job.template_ref_json || "{}");
+      const leadPayload = JSON.parse(job.lead_payload_json || "{}");
+      const templateName = templateRef.name || job.template_name;
+      const languageCode = templateRef.language || job.template_language || "pt_BR";
+      const bodyParameters = Array.isArray(templateRef.bodyParameters) && templateRef.bodyParameters.length
+        ? templateRef.bodyParameters
+        : [leadPayload.name || " "];
+
+      const payload = {
+        messaging_product: "whatsapp",
+        to: leadPayload.phone,
+        type: "template",
+        template: {
+          name: templateName,
+          language: {
+            code: languageCode,
+          },
+          components: [
+            {
+              type: "body",
+              parameters: bodyParameters.map((text) => ({
+                type: "text",
+                text: String(text),
+              })),
+            },
+          ],
+        },
+      };
+
+      const data = await sendWhatsAppRequest(payload);
+      const messageId = data.messages?.[0]?.id || null;
+      const acceptedStatus = data.messages?.[0]?.message_status || "accepted";
+
+      upsertTrackedMessage({
+        id: messageId,
+        queueJobId: job.id,
+        type: "template",
+        to: leadPayload.phone,
+        recipientId: leadPayload.phone,
+        templateName,
+        acceptedAt: new Date().toISOString(),
+        latestStatus: acceptedStatus,
+        apiAccepted: true,
+        input: data.contacts?.[0]?.input || leadPayload.phone,
+        waId: data.contacts?.[0]?.wa_id || null,
+      });
+
+      await markQueueJobResult(job.id, {
+        status: "sent",
+        remoteMessageId: messageId,
+        acceptedStatus,
+        processedAt: nowMysql(),
+      });
+
+      addLog("queue_sent", `Job ${job.id} enviado para ${leadPayload.phone}.`, {
+        templateName,
+        messageId,
+        acceptedStatus,
+      });
+      sent += 1;
+    } catch (error) {
+      await markQueueJobResult(job.id, {
+        status: "failed",
+        processedAt: nowMysql(),
+        lastError: error.response?.data ? JSON.stringify(error.response.data) : error.message,
+      });
+      addLog("queue_error", `Falha ao processar job ${job.id}.`, error.response?.data || error.message);
+      failed += 1;
+    }
+  }
+
+  return {
+    processed,
+    sent,
+    failed,
+    pendingFound: jobs.length,
+  };
+}
+
+function startQueueWorker() {
+  if (queueWorkerHandle || !isMySqlQueueEnabled()) {
+    return;
+  }
+
+  queueWorkerHandle = setInterval(() => {
+    processQueueJobs(20).catch((error) => {
+      addLog("queue_worker_error", "Falha no worker automatico da fila.", error.message);
+    });
+  }, Math.max(5000, queuePollIntervalMs));
 }
 
 function validateConfig() {
@@ -288,6 +729,9 @@ router.get("/health", async (_req, res) => {
       businessAccountId: businessAccountId || null,
       webhookVerifyTokenConfigured: Boolean(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN),
       appSecretConfigured: Boolean(appSecret),
+      mysqlQueueEnabled: isMySqlQueueEnabled(),
+      mysqlConfigured: Boolean(mysqlHost && mysqlDatabase && mysqlUser),
+      mysqlDriverInstalled: Boolean(mysql),
     };
 
     addLog("health", "Consulta de health executada com sucesso.", payload);
@@ -562,6 +1006,71 @@ router.post("/submit-template", async (req, res) => {
   }
 });
 
+router.post("/queue/template", async (req, res) => {
+  try {
+    validateConfig();
+
+    if (!isMySqlQueueEnabled()) {
+      return res.status(400).json({
+        success: false,
+        error: "Fila MySQL nao configurada no servidor.",
+      });
+    }
+
+    const { templateRef, leadPayload, scheduledFor, eventName } = req.body || {};
+    if (!templateRef?.name || !leadPayload?.phone || !scheduledFor || !eventName) {
+      return res.status(400).json({
+        success: false,
+        error: "`templateRef.name`, `leadPayload.phone`, `scheduledFor` e `eventName` sao obrigatorios.",
+      });
+    }
+
+    const job = await queueTemplateJob(req.body);
+    addLog("queue_created", `Job ${job.id} adicionado na fila remota.`, {
+      scheduledFor: job.scheduledFor,
+      eventName,
+      templateName: templateRef.name,
+      leadId: req.body.leadId || 0,
+    });
+    return res.json({ success: true, job });
+  } catch (error) {
+    addLog("queue_error", "Falha ao criar job remoto.", error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+router.post("/queue/process", async (req, res) => {
+  try {
+    validateConfig();
+    const limit = Number(req.body?.limit || 20);
+    const result = await processQueueJobs(limit);
+    const stats = await fetchQueueStats();
+    return res.json({ success: true, result, stats });
+  } catch (error) {
+    addLog("queue_error", "Falha ao processar fila sob demanda.", error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+router.get("/queue/stats", async (_req, res) => {
+  try {
+    const stats = await fetchQueueStats();
+    return res.json({ success: true, stats });
+  } catch (error) {
+    addLog("queue_error", "Falha ao consultar estatisticas da fila.", error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 router.get("/message-tracker", (_req, res) => {
   res.json({
     success: true,
@@ -575,16 +1084,29 @@ router.get("/logs", (_req, res) => {
 
 app.use(appBasePath, router);
 
-app.listen(port, () => {
+app.listen(port, async () => {
   try {
     validateConfig();
+    if (isMySqlQueueEnabled()) {
+      await ensurePersistenceTables();
+      startQueueWorker();
+    }
+
     console.log(`Servidor oficial do WhatsApp Cloud API em ${buildLocalUrl("/")}`);
     console.log(`Webhook de verificacao em ${buildLocalUrl("/webhook")}`);
     console.log(`Painel de testes em ${buildLocalUrl("/")}`);
+    if (isMySqlQueueEnabled()) {
+      console.log(`Fila MySQL ativa em ${mysqlHost}:${mysqlPort}/${mysqlDatabase}`);
+    } else {
+      console.log("Fila MySQL desativada: variaveis de banco ou mysql2 ausentes.");
+    }
     addLog("startup", `Servidor iniciado na porta ${port}.`, {
       apiVersion,
       phoneNumberId,
       basePath: appBasePath,
+      mysqlQueueEnabled: isMySqlQueueEnabled(),
+      mysqlConfigured: Boolean(mysqlHost && mysqlDatabase && mysqlUser),
+      mysqlDriverInstalled: Boolean(mysql),
     });
   } catch (error) {
     console.error("Falha ao iniciar servidor oficial:", error.message);

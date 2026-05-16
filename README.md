@@ -9,6 +9,7 @@ Servidor isolado para usar a API oficial da Meta com:
 - envio de template aprovado (`POST /send-template`)
 - submissao de template para aprovacao (`POST /submit-template`)
 - consulta de templates (`GET /message-templates`)
+- fila persistente em MySQL (`POST /queue/template`, `POST /queue/process`, `GET /queue/stats`)
 - consulta de logs (`GET /logs`)
 
 ## Variaveis usadas do `.env`
@@ -27,6 +28,12 @@ WHATSAPP_APP_SECRET=seu_app_secret_meta
 WHATSAPP_API_VERSION=v17.0
 WHATSAPP_OFFICIAL_PORT=3010
 WHATSAPP_OFFICIAL_BASE_PATH=/whats
+WHATSAPP_MYSQL_HOST=127.0.0.1
+WHATSAPP_MYSQL_PORT=3306
+WHATSAPP_MYSQL_DATABASE=whatsapp_official
+WHATSAPP_MYSQL_USER=whatsapp_user
+WHATSAPP_MYSQL_PASSWORD=senha_forte
+WHATSAPP_MYSQL_TABLE_PREFIX=wa_
 ```
 
 ## Como rodar
@@ -136,6 +143,51 @@ Opcionalmente:
 /message-templates?wabaId=123456789012345
 ```
 
+### Enfileirar template para envio automatico
+
+`POST /queue/template`
+
+Body:
+
+```json
+{
+  "automationId": 12,
+  "leadId": 54,
+  "eventName": "visited_checkout",
+  "scheduledFor": "2026-05-16 20:45:00",
+  "flowClassification": 1,
+  "templateRef": {
+    "name": "checkout_c1_abc12",
+    "language": "pt_BR",
+    "bodyParameters": ["Icaro", "Perfume X"]
+  },
+  "leadPayload": {
+    "name": "Icaro",
+    "phone": "5511999999999"
+  },
+  "automationMeta": {
+    "flow": "Recuperacao Checkout",
+    "classification": 1
+  }
+}
+```
+
+### Processar fila remotamente
+
+`POST /queue/process`
+
+Body opcional:
+
+```json
+{
+  "limit": 30
+}
+```
+
+### Estatisticas da fila
+
+`GET /queue/stats`
+
 ## Observacoes
 
 - Para iniciar conversa fora da janela de 24 horas, use template aprovado.
@@ -143,3 +195,4 @@ Opcionalmente:
 - Se `WHATSAPP_APP_SECRET` estiver definido, o servidor valida a assinatura `X-Hub-Signature-256`.
 - Para publicar em subpasta no VPS, configure `WHATSAPP_OFFICIAL_BASE_PATH=/whats`.
 - Exemplo de callback URL na Meta: `https://inovetime.com/whats/webhook`
+- Se o MySQL estiver configurado, o servidor sobe um worker automatico para processar a fila e persistir status de entrega/leitura.
