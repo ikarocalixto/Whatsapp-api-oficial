@@ -440,6 +440,106 @@ async function fetchQueueStats() {
   return stats;
 }
 
+async function fetchTrackedMessages(limit = 50) {
+  const normalizedLimit = Math.max(1, Number(limit || 50));
+  const pool = await getDbPool();
+  if (!pool) {
+    return messageTracker.slice(0, normalizedLimit);
+  }
+
+  const trackerTable = getTableName("message_tracker");
+  const queueTable = getTableName("queue_jobs");
+  const [rows] = await pool.execute(
+    `SELECT
+        tracker.id,
+        tracker.queue_job_id,
+        tracker.recipient_id,
+        tracker.latest_status,
+        tracker.type,
+        tracker.template_name,
+        tracker.api_accepted,
+        tracker.accepted_at,
+        tracker.delivered_at,
+        tracker.read_at,
+        tracker.failed_at,
+        tracker.last_webhook_at,
+        tracker.conversation_id,
+        tracker.pricing_category,
+        tracker.pricing_billable,
+        tracker.wa_id,
+        tracker.input_phone,
+        tracker.metadata_json,
+        tracker.errors_json,
+        tracker.created_at,
+        tracker.updated_at,
+        queue.automation_id,
+        queue.lead_id,
+        queue.event_name,
+        queue.flow_name,
+        queue.flow_classification,
+        queue.scheduled_for,
+        queue.status AS queue_status,
+        queue.attempts,
+        queue.remote_message_id,
+        queue.accepted_status,
+        queue.processed_at,
+        queue.last_error
+      FROM \`${trackerTable}\` tracker
+      LEFT JOIN \`${queueTable}\` queue ON queue.id = tracker.queue_job_id
+      ORDER BY COALESCE(tracker.read_at, tracker.delivered_at, tracker.failed_at, tracker.accepted_at, tracker.updated_at, tracker.created_at) DESC
+      LIMIT ?`,
+    [normalizedLimit]
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    queueJobId: row.queue_job_id,
+    recipientId: row.recipient_id,
+    latestStatus: row.latest_status,
+    type: row.type,
+    templateName: row.template_name,
+    apiAccepted: Boolean(row.api_accepted),
+    acceptedAt: row.accepted_at,
+    deliveredAt: row.delivered_at,
+    readAt: row.read_at,
+    failedAt: row.failed_at,
+    lastWebhookAt: row.last_webhook_at,
+    conversationId: row.conversation_id,
+    pricingCategory: row.pricing_category,
+    pricingBillable: row.pricing_billable === null ? null : Boolean(row.pricing_billable),
+    waId: row.wa_id,
+    input: row.input_phone,
+    metadata: safeJsonParse(row.metadata_json),
+    errors: safeJsonParse(row.errors_json),
+    automationId: row.automation_id,
+    leadId: row.lead_id,
+    eventName: row.event_name,
+    flowName: row.flow_name,
+    flowClassification: row.flow_classification,
+    scheduledFor: row.scheduled_for,
+    queueStatus: row.queue_status,
+    attempts: row.attempts,
+    remoteMessageId: row.remote_message_id,
+    acceptedStatus: row.accepted_status,
+    processedAt: row.processed_at,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function safeJsonParse(value) {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return null;
+  }
+}
+
 async function processQueueJobs(limit = 20) {
   const jobs = await fetchDueQueueJobs(limit);
   let processed = 0;
@@ -784,8 +884,37 @@ async function resolveBusinessAccountId(requestWabaId) {
   return null;
 }
 
-function buildTemplateComponents({ bodyText, footerText, bodyExamples }) {
+function buildTemplateComponents({
+  bodyText,
+  footerText,
+  bodyExamples,
+  headerFormat,
+  headerText,
+  headerExampleHandle,
+}) {
   const components = [];
+
+  const normalizedHeaderFormat = String(headerFormat || "NONE").trim().toUpperCase();
+  if (normalizedHeaderFormat === "TEXT" && headerText) {
+    components.push({
+      type: "HEADER",
+      format: "TEXT",
+      text: String(headerText).trim(),
+    });
+  } else if (["IMAGE", "VIDEO", "DOCUMENT"].includes(normalizedHeaderFormat)) {
+    const headerComponent = {
+      type: "HEADER",
+      format: normalizedHeaderFormat,
+    };
+
+    if (headerExampleHandle) {
+      headerComponent.example = {
+        header_handle: [String(headerExampleHandle).trim()],
+      };
+    }
+
+    components.push(headerComponent);
+  }
 
   if (bodyText) {
     const bodyComponent = {
@@ -820,6 +949,9 @@ async function createMessageTemplate({
   bodyText,
   footerText,
   bodyExamples,
+  headerFormat,
+  headerText,
+  headerExampleHandle,
   allowCategoryChange,
 }) {
   const response = await axios.post(
@@ -829,7 +961,14 @@ async function createMessageTemplate({
       category,
       language,
       allow_category_change: Boolean(allowCategoryChange),
-      components: buildTemplateComponents({ bodyText, footerText, bodyExamples }),
+      components: buildTemplateComponents({
+        bodyText,
+        footerText,
+        bodyExamples,
+        headerFormat,
+        headerText,
+        headerExampleHandle,
+      }),
     },
     {
       headers: {
@@ -1105,6 +1244,9 @@ router.post("/submit-template", async (req, res) => {
       bodyText,
       footerText,
       bodyExamples = [],
+      headerFormat = "NONE",
+      headerText = "",
+      headerExampleHandle = "",
       allowCategoryChange = true,
     } = req.body;
 
@@ -1135,6 +1277,9 @@ router.post("/submit-template", async (req, res) => {
       bodyText,
       footerText,
       bodyExamples: normalizedExamples,
+      headerFormat,
+      headerText,
+      headerExampleHandle,
       allowCategoryChange,
     });
 
@@ -1142,6 +1287,7 @@ router.post("/submit-template", async (req, res) => {
       wabaId,
       category,
       language,
+      headerFormat,
       response: data,
     });
 
@@ -1220,11 +1366,21 @@ router.get("/queue/stats", async (_req, res) => {
   }
 });
 
-router.get("/message-tracker", (_req, res) => {
-  res.json({
-    success: true,
-    messages: messageTracker,
-  });
+router.get("/message-tracker", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 50);
+    const messages = await fetchTrackedMessages(limit);
+    res.json({
+      success: true,
+      messages,
+    });
+  } catch (error) {
+    addLog("tracker_error", "Falha ao consultar message tracker.", error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
 });
 
 router.get("/logs", (_req, res) => {
