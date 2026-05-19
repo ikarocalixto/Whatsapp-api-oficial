@@ -71,6 +71,38 @@ function buildLocalUrl(routePath = "") {
   return appBasePath === "/" ? `http://localhost:${port}${normalizedRoute}` : `http://localhost:${port}${appBasePath}${normalizedRoute}`;
 }
 
+function toMysqlDateTime(value) {
+  if (!value) return null;
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 19).replace("T", " ");
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const ms = value > 9999999999 ? value : value * 1000;
+    const date = new Date(ms);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 19).replace("T", " ");
+  }
+
+  const stringValue = String(value).trim();
+  if (!stringValue) return null;
+
+  if (/^\d+$/.test(stringValue)) {
+    const numeric = Number(stringValue);
+    if (!Number.isFinite(numeric)) return null;
+    const ms = stringValue.length >= 13 ? numeric : numeric * 1000;
+    const date = new Date(ms);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 19).replace("T", " ");
+  }
+
+  const parsed = new Date(stringValue);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 19).replace("T", " ");
+  }
+
+  return null;
+}
+
 function addLog(type, message, details = null) {
   logs.unshift({
     id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
@@ -296,11 +328,11 @@ async function persistTrackedMessage(entry) {
       entry.type || null,
       entry.templateName || null,
       entry.apiAccepted ? 1 : 0,
-      entry.acceptedAt ? String(entry.acceptedAt).slice(0, 19).replace("T", " ") : null,
+      toMysqlDateTime(entry.acceptedAt),
       deliveredAt,
       readAt,
       failedAt,
-      entry.lastWebhookAt ? String(entry.lastWebhookAt).slice(0, 19).replace("T", " ") : null,
+      toMysqlDateTime(entry.lastWebhookAt),
       entry.conversationId || null,
       entry.pricingCategory || null,
       typeof entry.pricingBillable === "boolean" ? (entry.pricingBillable ? 1 : 0) : null,
