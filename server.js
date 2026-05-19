@@ -39,6 +39,8 @@ const mysqlUser = process.env.WHATSAPP_MYSQL_USER || process.env.MYSQL_USER || "
 const mysqlPassword = process.env.WHATSAPP_MYSQL_PASSWORD || process.env.MYSQL_PASSWORD || "";
 const mysqlTablePrefix = process.env.WHATSAPP_MYSQL_TABLE_PREFIX || "wa_";
 const queuePollIntervalMs = Number(process.env.WHATSAPP_QUEUE_POLL_INTERVAL_MS || 15000);
+const wordpressAssistantUrl = process.env.WORDPRESS_ASSISTANT_URL || "";
+const wordpressAssistantToken = process.env.WORDPRESS_ASSISTANT_TOKEN || "";
 const logs = [];
 const messageTracker = [];
 let dbPool = null;
@@ -83,6 +85,17 @@ function addLog(type, message, details = null) {
   }
 
   void persistRuntimeLog(type, message, details);
+}
+
+function getIncomingMessageText(message) {
+  return (
+    message?.text ||
+    message?.buttonReply ||
+    message?.listReply ||
+    message?.documentCaption ||
+    message?.imageCaption ||
+    ""
+  );
 }
 
 function upsertTrackedMessage(entry) {
@@ -571,6 +584,10 @@ function extractWebhookMessages(body) {
     const changes = Array.isArray(entry.changes) ? entry.changes : [];
     for (const change of changes) {
       const value = change.value || {};
+      const contacts = Array.isArray(value.contacts) ? value.contacts : [];
+      const contactNames = new Map(
+        contacts.map((contact) => [String(contact.wa_id || ""), contact.profile?.name || null])
+      );
       if (Array.isArray(value.messages)) {
         for (const message of value.messages) {
           messages.push({
@@ -581,6 +598,12 @@ function extractWebhookMessages(body) {
             text: message.text?.body || null,
             buttonReply: message.interactive?.button_reply?.title || null,
             listReply: message.interactive?.list_reply?.title || null,
+            profileName: contactNames.get(String(message.from || "")) || null,
+            audioId: message.audio?.id || null,
+            audioMimeType: message.audio?.mime_type || null,
+            audioVoice: Boolean(message.audio?.voice),
+            imageCaption: message.image?.caption || null,
+            documentCaption: message.document?.caption || null,
           });
         }
       }
@@ -621,6 +644,125 @@ async function sendWhatsAppRequest(payload) {
   });
 
   return response.data;
+}
+
+async function downloadWhatsAppMedia(mediaId) {
+  const metaResponse = await axios.get(`${baseUrl}/${mediaId}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const downloadUrl = metaResponse.data?.url;
+  if (!downloadUrl) {
+    throw new Error("Meta nao retornou URL de download para a midia recebida.");
+  }
+
+  const mediaResponse = await axios.get(downloadUrl, {
+    responseType: "arraybuffer",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  return {
+    mimeType: metaResponse.data?.mime_type || mediaResponse.headers["content-type"] || "audio/ogg",
+    base64: Buffer.from(mediaResponse.data).toString("base64"),
+  };
+}
+
+async function requestWordPressAssistantReply(message) {
+  if (!wordpressAssistantUrl || !wordpressAssistantToken) {
+    return null;
+  }
+
+  const payload = {
+    from: message.from,
+    name: message.profileName || "",
+    type: message.type,
+    message: getIncomingMessageText(message),
+    button_reply: message.buttonReply || "",
+    list_reply: message.listReply || "",
+  };
+
+  if (message.type === "audio" && message.audioId) {
+    const audio = await downloadWhatsAppMedia(message.audioId);
+    payload.audio_base64 = audio.base64;
+    payload.audio_mime_type = audio.mimeType;
+  }
+
+  const response = await axios.post(wordpressAssistantUrl, payload, {
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${wordpressAssistantToken}`,
+    },
+    timeout: 60000,
+  });
+
+  return response.data;
+}
+
+async function sendTextMessagesInSequence(to, chunks) {
+  for (const chunk of chunks) {
+    const body = String(chunk || "").trim();
+    if (!body) continue;
+    await sendWhatsAppRequest({
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: {
+        body,
+        preview_url: false,
+      },
+    });
+  }
+}
+
+async function handleIncomingMessageWithAssistant(message) {
+  if (!wordpressAssistantUrl || !wordpressAssistantToken) {
+    return;
+  }
+
+  try {
+    const assistant = await requestWordPressAssistantReply(message);
+    if (!assistant?.chunks?.length && !assistant?.handoff?.alert_message) {
+      addLog("assistant_skip", "Assistente nao retornou mensagens para envio.", {
+        from: message.from,
+        type: message.type,
+        mode: assistant?.mode || null,
+      });
+      return;
+    }
+
+    if (Array.isArray(assistant.chunks) && assistant.chunks.length > 0) {
+      await sendTextMessagesInSequence(message.from, assistant.chunks);
+    }
+
+    if (
+      assistant.handoff?.notify_human &&
+      assistant.handoff?.number &&
+      assistant.handoff?.alert_message &&
+      String(assistant.handoff.number) !== String(message.from)
+    ) {
+      await sendTextMessagesInSequence(assistant.handoff.number, [assistant.handoff.alert_message]);
+    }
+
+    addLog("assistant_reply", "Assistente respondeu a mensagem recebida.", {
+      from: message.from,
+      type: message.type,
+      mode: assistant.mode || null,
+      chunks: assistant.chunks?.length || 0,
+      handoffNumber: assistant.handoff?.number || null,
+    });
+  } catch (error) {
+    addLog("assistant_error", "Falha ao processar resposta automatica com WordPress.", error.response?.data || error.message);
+  }
+}
+
+async function handleIncomingMessages(messages) {
+  for (const message of messages) {
+    await handleIncomingMessageWithAssistant(message);
+  }
 }
 
 async function fetchPhoneNumberMetadata() {
@@ -732,6 +874,7 @@ router.get("/health", async (_req, res) => {
       mysqlQueueEnabled: isMySqlQueueEnabled(),
       mysqlConfigured: Boolean(mysqlHost && mysqlDatabase && mysqlUser),
       mysqlDriverInstalled: Boolean(mysql),
+      wordpressAssistantConfigured: Boolean(wordpressAssistantUrl && wordpressAssistantToken),
     };
 
     addLog("health", "Consulta de health executada com sucesso.", payload);
@@ -801,7 +944,13 @@ router.post("/webhook", (req, res) => {
     }
   }
 
-  return res.sendStatus(200);
+  res.sendStatus(200);
+
+  if (messages.length) {
+    void handleIncomingMessages(messages);
+  }
+
+  return;
 });
 
 router.post("/send-text", async (req, res) => {

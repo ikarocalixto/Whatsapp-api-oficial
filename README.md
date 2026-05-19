@@ -11,6 +11,7 @@ Servidor isolado para usar a API oficial da Meta com:
 - consulta de templates (`GET /message-templates`)
 - fila persistente em MySQL (`POST /queue/template`, `POST /queue/process`, `GET /queue/stats`)
 - consulta de logs (`GET /logs`)
+- resposta automatica via WordPress/Gemini quando o endpoint da assistente estiver configurado
 
 ## Variaveis usadas do `.env`
 
@@ -34,6 +35,8 @@ WHATSAPP_MYSQL_DATABASE=whatsapp_official
 WHATSAPP_MYSQL_USER=whatsapp_user
 WHATSAPP_MYSQL_PASSWORD=senha_forte
 WHATSAPP_MYSQL_TABLE_PREFIX=wa_
+WORDPRESS_ASSISTANT_URL=https://seu-site.com/wp-json/alethe-crm/v1/assistant/reply
+WORDPRESS_ASSISTANT_TOKEN=sua_chave_api_do_plugin
 ```
 
 ## Como rodar
@@ -196,3 +199,4 @@ Body opcional:
 - Para publicar em subpasta no VPS, configure `WHATSAPP_OFFICIAL_BASE_PATH=/whats`.
 - Exemplo de callback URL na Meta: `https://inovetime.com/whats/webhook`
 - Se o MySQL estiver configurado, o servidor sobe um worker automatico para processar a fila e persistir status de entrega/leitura.
+- Se `WORDPRESS_ASSISTANT_URL` e `WORDPRESS_ASSISTANT_TOKEN` estiverem configurados, mensagens recebidas e audios podem ser encaminhados para o WordPress responder com IA, fallback padrao e handoff humano.
