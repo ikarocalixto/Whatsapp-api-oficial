@@ -41,6 +41,8 @@ const mysqlTablePrefix = process.env.WHATSAPP_MYSQL_TABLE_PREFIX || "wa_";
 const queuePollIntervalMs = Number(process.env.WHATSAPP_QUEUE_POLL_INTERVAL_MS || 15000);
 const wordpressAssistantUrl = process.env.WORDPRESS_ASSISTANT_URL || "";
 const wordpressAssistantToken = process.env.WORDPRESS_ASSISTANT_TOKEN || "";
+const geminiApiKey = process.env.GEMINI_API_KEY || "";
+const geminiModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 const logs = [];
 const messageTracker = [];
 let dbPool = null;
@@ -266,6 +268,167 @@ async function ensurePersistenceTables() {
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
       KEY idx_type_created (type, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // ── Tabelas do sistema multi-tenant e IA ────────────────────────────────
+  const tenantsTable = getTableName("tenants");
+  const agentsTable = getTableName("agents");
+  const knowledgeTable = getTableName("knowledge_base");
+  const conversationsTable = getTableName("conversations");
+  const phoneTenantMapTable = getTableName("phone_tenant_map");
+  const leadsCacheTable = getTableName("leads_cache");
+  const campaignsTable = getTableName("campaigns");
+  const campaignRecipientsTable = getTableName("campaign_recipients");
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${tenantsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      client_id VARCHAR(100) NOT NULL,
+      wp_url VARCHAR(255) NOT NULL,
+      api_key VARCHAR(255) NOT NULL,
+      active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uniq_client_id (client_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${agentsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(191) NOT NULL,
+      prompt LONGTEXT NOT NULL,
+      keywords_json LONGTEXT DEFAULT NULL,
+      assigned_domains_json LONGTEXT DEFAULT NULL,
+      transfer_keywords_json LONGTEXT DEFAULT NULL,
+      transfer_number VARCHAR(30) DEFAULT NULL,
+      icon VARCHAR(50) DEFAULT '🤖',
+      description VARCHAR(255) DEFAULT NULL,
+      active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${knowledgeTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      agent_id BIGINT UNSIGNED DEFAULT NULL,
+      title VARCHAR(255) NOT NULL,
+      content LONGTEXT NOT NULL,
+      keywords_json LONGTEXT DEFAULT NULL,
+      active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_agent (agent_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${conversationsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      client_id VARCHAR(100) NOT NULL,
+      phone VARCHAR(30) NOT NULL,
+      role VARCHAR(15) NOT NULL,
+      message LONGTEXT NOT NULL,
+      agent_id BIGINT UNSIGNED DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_phone_client (client_id, phone),
+      KEY idx_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${phoneTenantMapTable}\` (
+      phone VARCHAR(30) NOT NULL,
+      client_id VARCHAR(100) NOT NULL,
+      lead_name VARCHAR(191) DEFAULT NULL,
+      first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (phone),
+      KEY idx_client (client_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${leadsCacheTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      client_id VARCHAR(100) NOT NULL,
+      phone VARCHAR(30) NOT NULL,
+      email VARCHAR(191) DEFAULT NULL,
+      name VARCHAR(191) DEFAULT NULL,
+      score INT NOT NULL DEFAULT 0,
+      stage VARCHAR(50) DEFAULT NULL,
+      utm_source VARCHAR(191) DEFAULT NULL,
+      utm_medium VARCHAR(191) DEFAULT NULL,
+      utm_campaign VARCHAR(191) DEFAULT NULL,
+      cart_abandoned TINYINT(1) NOT NULL DEFAULT 0,
+      total_orders INT NOT NULL DEFAULT 0,
+      last_order_date DATE DEFAULT NULL,
+      last_order_product VARCHAR(255) DEFAULT NULL,
+      total_spent DECIMAL(10,2) NOT NULL DEFAULT 0,
+      days_since_last_purchase INT DEFAULT NULL,
+      visited_pages_json LONGTEXT DEFAULT NULL,
+      qualification_json LONGTEXT DEFAULT NULL,
+      last_synced_at DATETIME DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uniq_client_phone (client_id, phone),
+      KEY idx_score (score),
+      KEY idx_stage (stage),
+      KEY idx_last_order (last_order_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${campaignsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(191) NOT NULL,
+      client_id VARCHAR(100) DEFAULT NULL,
+      description TEXT DEFAULT NULL,
+      filter_params_json LONGTEXT NOT NULL DEFAULT '{}',
+      message_type VARCHAR(20) NOT NULL DEFAULT 'text',
+      message_text TEXT DEFAULT NULL,
+      template_name VARCHAR(191) DEFAULT NULL,
+      template_language VARCHAR(20) NOT NULL DEFAULT 'pt_BR',
+      status VARCHAR(20) NOT NULL DEFAULT 'draft',
+      total_in_list INT NOT NULL DEFAULT 0,
+      total_sent INT NOT NULL DEFAULT 0,
+      total_delivered INT NOT NULL DEFAULT 0,
+      total_read INT NOT NULL DEFAULT 0,
+      total_failed INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_client_status (client_id, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${campaignRecipientsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      campaign_id BIGINT UNSIGNED NOT NULL,
+      client_id VARCHAR(100) NOT NULL,
+      phone VARCHAR(30) NOT NULL,
+      lead_name VARCHAR(191) DEFAULT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      message_id VARCHAR(191) DEFAULT NULL,
+      skip_reason VARCHAR(100) DEFAULT NULL,
+      sent_at DATETIME DEFAULT NULL,
+      delivered_at DATETIME DEFAULT NULL,
+      read_at DATETIME DEFAULT NULL,
+      failed_at DATETIME DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uniq_campaign_phone (campaign_id, phone),
+      KEY idx_campaign (campaign_id),
+      KEY idx_status (status),
+      KEY idx_message_id (message_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
@@ -851,43 +1014,81 @@ async function sendTextMessagesInSequence(to, chunks) {
 }
 
 async function handleIncomingMessageWithAssistant(message) {
-  if (!wordpressAssistantUrl || !wordpressAssistantToken) {
-    return;
+  // ── MODO 1: IA nativa na VPS (Gemini) ────────────────────────────────
+  if (geminiApiKey && isMySqlQueueEnabled()) {
+    try {
+      const tenant = await resolveTenantForPhone(message.from);
+      if (!tenant) {
+        addLog("assistant_skip", "Nenhum tenant encontrado para o numero. Tentando fallback WP.", { from: message.from });
+        return _handleWithWordPress(message);
+      }
+      const allAgents = await getAgents();
+      const userText = getIncomingMessageText(message);
+      const agent = resolveAgentForTenant(tenant.client_id, allAgents, userText);
+      if (!agent) {
+        addLog("assistant_skip", "Nenhum agente configurado para o tenant.", { clientId: tenant.client_id });
+        return _handleWithWordPress(message);
+      }
+      const leadContext = await fetchLeadContextFromWP(tenant, message.from).catch(() => null);
+      const history = await getConversationHistory(tenant.client_id, message.from, 10);
+      const knowledgeItems = getRelevantKnowledge(await getKnowledgeItems(agent.id), userText);
+      const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems);
+      let audioBase64 = null;
+      let audioMimeType = null;
+      if (message.type === "audio" && message.audioId) {
+        const audio = await downloadWhatsAppMedia(message.audioId).catch(() => null);
+        if (audio) { audioBase64 = audio.base64; audioMimeType = audio.mimeType; }
+      }
+      const reply = await callGeminiDirect(geminiApiKey, systemPrompt, history, userText, audioBase64, audioMimeType);
+      if (!reply) {
+        addLog("assistant_skip", "Gemini nao retornou resposta.", { from: message.from });
+        return;
+      }
+      const storedUserMsg = audioBase64 ? "[áudio]" : (userText || "[mensagem]");
+      await saveConversationMessage(tenant.client_id, message.from, "user", storedUserMsg, agent.id);
+      await saveConversationMessage(tenant.client_id, message.from, "assistant", reply, agent.id);
+      const transferKeywords = safeJsonParse(agent.transfer_keywords_json) || [];
+      const shouldTransfer = transferKeywords.some((kw) => (userText || "").toLowerCase().includes(kw.toLowerCase()));
+      await sendTextMessagesInSequence(message.from, chunkMessage(reply, 1000));
+      if (shouldTransfer && agent.transfer_number && String(agent.transfer_number) !== String(message.from)) {
+        await sendTextMessagesInSequence(agent.transfer_number, [
+          `🔔 Cliente ${message.from}${leadContext?.name ? ` (${leadContext.name})` : ""} solicitou atendimento humano.\nMensagem: "${userText}"`,
+        ]);
+      }
+      addLog("assistant_reply", "Assistente VPS (Gemini) respondeu.", {
+        from: message.from, clientId: tenant.client_id, agent: agent.name,
+      });
+      return;
+    } catch (error) {
+      addLog("assistant_error", "Falha no assistente VPS. Tentando fallback WP.", error.response?.data || error.message);
+    }
   }
+  // ── MODO 2: Fallback WordPress ────────────────────────────────────────
+  return _handleWithWordPress(message);
+}
 
+async function _handleWithWordPress(message) {
+  if (!wordpressAssistantUrl || !wordpressAssistantToken) return;
   try {
     const assistant = await requestWordPressAssistantReply(message);
     if (!assistant?.chunks?.length && !assistant?.handoff?.alert_message) {
-      addLog("assistant_skip", "Assistente nao retornou mensagens para envio.", {
-        from: message.from,
-        type: message.type,
-        mode: assistant?.mode || null,
-      });
+      addLog("assistant_skip", "Assistente WP nao retornou mensagens.", { from: message.from, mode: assistant?.mode || null });
       return;
     }
-
     if (Array.isArray(assistant.chunks) && assistant.chunks.length > 0) {
       await sendTextMessagesInSequence(message.from, assistant.chunks);
     }
-
     if (
-      assistant.handoff?.notify_human &&
-      assistant.handoff?.number &&
-      assistant.handoff?.alert_message &&
-      String(assistant.handoff.number) !== String(message.from)
+      assistant.handoff?.notify_human && assistant.handoff?.number &&
+      assistant.handoff?.alert_message && String(assistant.handoff.number) !== String(message.from)
     ) {
       await sendTextMessagesInSequence(assistant.handoff.number, [assistant.handoff.alert_message]);
     }
-
-    addLog("assistant_reply", "Assistente respondeu a mensagem recebida.", {
-      from: message.from,
-      type: message.type,
-      mode: assistant.mode || null,
-      chunks: assistant.chunks?.length || 0,
-      handoffNumber: assistant.handoff?.number || null,
+    addLog("assistant_reply", "Assistente WP respondeu.", {
+      from: message.from, chunks: assistant.chunks?.length || 0, handoffNumber: assistant.handoff?.number || null,
     });
   } catch (error) {
-    addLog("assistant_error", "Falha ao processar resposta automatica com WordPress.", error.response?.data || error.message);
+    addLog("assistant_error", "Falha no assistente WP.", error.response?.data || error.message);
   }
 }
 
@@ -1026,6 +1227,511 @@ async function listMessageTemplates(wabaId) {
   return response.data;
 }
 
+// =====================================================================
+// SEÇÃO: MULTI-TENANT, IA GEMINI E CAMPANHAS
+// =====================================================================
+
+// ── Utilitário ────────────────────────────────────────────────────────
+function chunkMessage(text, maxLen = 1000) {
+  if (!text || text.length <= maxLen) return [String(text)].filter(Boolean);
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = start + maxLen;
+    if (end < text.length) {
+      const lastNewline = text.lastIndexOf("\n", end);
+      const lastPeriod = text.lastIndexOf(". ", end);
+      if (lastNewline > start + 100) end = lastNewline + 1;
+      else if (lastPeriod > start + 100) end = lastPeriod + 2;
+    }
+    const part = text.slice(start, Math.min(end, text.length)).trim();
+    if (part) chunks.push(part);
+    start = end;
+  }
+  return chunks.filter(Boolean);
+}
+
+// ── CRUD: Tenants ──────────────────────────────────────────────────────
+async function getTenants() {
+  const pool = await getDbPool();
+  if (!pool) return [];
+  const [rows] = await pool.query(`SELECT * FROM \`${getTableName("tenants")}\` ORDER BY created_at ASC`);
+  return rows;
+}
+
+async function upsertTenant({ clientId, wpUrl, apiKey, active = 1 }) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  await pool.execute(
+    `INSERT INTO \`${getTableName("tenants")}\` (client_id, wp_url, api_key, active)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE wp_url = VALUES(wp_url), api_key = VALUES(api_key), active = VALUES(active)`,
+    [clientId, wpUrl, apiKey, active ? 1 : 0]
+  );
+}
+
+async function deleteTenant(clientId) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  await pool.execute(`DELETE FROM \`${getTableName("tenants")}\` WHERE client_id = ?`, [clientId]);
+}
+
+async function getTenantById(clientId) {
+  const pool = await getDbPool();
+  if (!pool) return null;
+  const [rows] = await pool.execute(
+    `SELECT * FROM \`${getTableName("tenants")}\` WHERE client_id = ? AND active = 1`,
+    [clientId]
+  );
+  return rows[0] || null;
+}
+
+// ── CRUD: Agentes ──────────────────────────────────────────────────────
+async function getAgents() {
+  const pool = await getDbPool();
+  if (!pool) return [];
+  const [rows] = await pool.query(`SELECT * FROM \`${getTableName("agents")}\` ORDER BY id ASC`);
+  return rows;
+}
+
+async function upsertAgent(data) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  const { id, name, prompt, keywords, assignedDomains, transferKeywords, transferNumber, icon, description, active } = data;
+  if (id) {
+    await pool.execute(
+      `UPDATE \`${getTableName("agents")}\`
+       SET name=?, prompt=?, keywords_json=?, assigned_domains_json=?, transfer_keywords_json=?,
+           transfer_number=?, icon=?, description=?, active=?
+       WHERE id=?`,
+      [
+        name, prompt,
+        keywords ? JSON.stringify(keywords) : null,
+        assignedDomains ? JSON.stringify(assignedDomains) : null,
+        transferKeywords ? JSON.stringify(transferKeywords) : null,
+        transferNumber || null, icon || "🤖", description || null,
+        active !== false ? 1 : 0, id,
+      ]
+    );
+  } else {
+    await pool.execute(
+      `INSERT INTO \`${getTableName("agents")}\`
+       (name, prompt, keywords_json, assigned_domains_json, transfer_keywords_json, transfer_number, icon, description, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        name, prompt,
+        keywords ? JSON.stringify(keywords) : null,
+        assignedDomains ? JSON.stringify(assignedDomains) : null,
+        transferKeywords ? JSON.stringify(transferKeywords) : null,
+        transferNumber || null, icon || "🤖", description || null,
+        active !== false ? 1 : 0,
+      ]
+    );
+  }
+}
+
+async function deleteAgent(id) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  await pool.execute(`DELETE FROM \`${getTableName("agents")}\` WHERE id = ?`, [id]);
+}
+
+// ── CRUD: Knowledge Base ───────────────────────────────────────────────
+async function getKnowledgeItems(agentId = null) {
+  const pool = await getDbPool();
+  if (!pool) return [];
+  if (agentId) {
+    const [rows] = await pool.execute(
+      `SELECT * FROM \`${getTableName("knowledge_base")}\` WHERE (agent_id = ? OR agent_id IS NULL) AND active = 1 ORDER BY id ASC`,
+      [agentId]
+    );
+    return rows;
+  }
+  const [rows] = await pool.query(`SELECT * FROM \`${getTableName("knowledge_base")}\` ORDER BY id ASC`);
+  return rows;
+}
+
+async function upsertKnowledgeItem(data) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  const { id, agentId, title, content, keywords, active } = data;
+  if (id) {
+    await pool.execute(
+      `UPDATE \`${getTableName("knowledge_base")}\` SET agent_id=?, title=?, content=?, keywords_json=?, active=? WHERE id=?`,
+      [agentId || null, title, content, keywords ? JSON.stringify(keywords) : null, active !== false ? 1 : 0, id]
+    );
+  } else {
+    await pool.execute(
+      `INSERT INTO \`${getTableName("knowledge_base")}\` (agent_id, title, content, keywords_json, active) VALUES (?, ?, ?, ?, ?)`,
+      [agentId || null, title, content, keywords ? JSON.stringify(keywords) : null, active !== false ? 1 : 0]
+    );
+  }
+}
+
+async function deleteKnowledgeItem(id) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  await pool.execute(`DELETE FROM \`${getTableName("knowledge_base")}\` WHERE id = ?`, [id]);
+}
+
+// ── CRUD: Conversas ────────────────────────────────────────────────────
+async function getConversationHistory(clientId, phone, limit = 10) {
+  const pool = await getDbPool();
+  if (!pool) return [];
+  const [rows] = await pool.execute(
+    `SELECT role, message, agent_id, created_at FROM \`${getTableName("conversations")}\`
+     WHERE client_id = ? AND phone = ?
+     ORDER BY created_at DESC LIMIT ?`,
+    [clientId, phone, Number(limit)]
+  );
+  return rows.reverse();
+}
+
+async function saveConversationMessage(clientId, phone, role, message, agentId = null) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(
+    `INSERT INTO \`${getTableName("conversations")}\` (client_id, phone, role, message, agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    [clientId, phone, role, message, agentId || null, nowMysql()]
+  );
+}
+
+async function clearConversationHistory(phone, clientId = null) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  if (clientId) {
+    await pool.execute(`DELETE FROM \`${getTableName("conversations")}\` WHERE phone = ? AND client_id = ?`, [phone, clientId]);
+  } else {
+    await pool.execute(`DELETE FROM \`${getTableName("conversations")}\` WHERE phone = ?`, [phone]);
+  }
+}
+
+// ── IA: Resolução de tenant ────────────────────────────────────────────
+async function resolveTenantForPhone(phone) {
+  const pool = await getDbPool();
+  if (!pool) return null;
+  const mapTable = getTableName("phone_tenant_map");
+  const [cached] = await pool.execute(`SELECT client_id FROM \`${mapTable}\` WHERE phone = ?`, [phone]);
+  if (cached.length > 0) {
+    return getTenantById(cached[0].client_id);
+  }
+  const tenants = await getTenants();
+  for (const tenant of tenants.filter((t) => t.active)) {
+    try {
+      const ctx = await fetchLeadContextFromWP(tenant, phone);
+      if (ctx && ctx.found) {
+        await pool.execute(
+          `INSERT INTO \`${mapTable}\` (phone, client_id, lead_name) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE client_id=VALUES(client_id), lead_name=VALUES(lead_name)`,
+          [phone, tenant.client_id, ctx.name || null]
+        );
+        return tenant;
+      }
+    } catch (_) { /* continua para o próximo tenant */ }
+  }
+  return null;
+}
+
+// ── IA: Resolução de agente ────────────────────────────────────────────
+function resolveAgentForTenant(clientId, allAgents, messageText) {
+  const active = allAgents.filter((a) => a.active);
+  const tenantSpecific = active.filter((a) => {
+    const domains = safeJsonParse(a.assigned_domains_json) || [];
+    return domains.length > 0 && domains.includes(clientId);
+  });
+  const globals = active.filter((a) => {
+    const domains = safeJsonParse(a.assigned_domains_json) || [];
+    return domains.length === 0;
+  });
+  const candidates = tenantSpecific.length > 0 ? tenantSpecific : globals;
+  if (!candidates.length) return null;
+  const msg = (messageText || "").toLowerCase();
+  for (const agent of candidates) {
+    const keywords = safeJsonParse(agent.keywords_json) || [];
+    if (keywords.some((kw) => msg.includes(kw.toLowerCase()))) return agent;
+  }
+  return candidates[0];
+}
+
+// ── IA: Contexto do lead no WordPress ─────────────────────────────────
+async function fetchLeadContextFromWP(tenant, phone) {
+  if (!tenant?.wp_url || !tenant?.api_key) return null;
+  const response = await axios.get(
+    `${String(tenant.wp_url).replace(/\/$/, "")}/wp-json/alethe-crm/v1/lead-context`,
+    {
+      params: { phone },
+      headers: { Authorization: `Bearer ${tenant.api_key}` },
+      timeout: 10000,
+    }
+  );
+  return response.data || null;
+}
+
+// ── IA: Conhecimento relevante ─────────────────────────────────────────
+function getRelevantKnowledge(items, messageText, limit = 5) {
+  if (!items.length) return [];
+  const msg = (messageText || "").toLowerCase();
+  return items
+    .filter((i) => i.active)
+    .map((item) => {
+      const keywords = safeJsonParse(item.keywords_json) || [];
+      const score = keywords.filter((kw) => msg.includes(kw.toLowerCase())).length;
+      return { item, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((e) => e.item);
+}
+
+// ── IA: Prompt personalizado ───────────────────────────────────────────
+function buildPersonalizedPrompt(agent, lead, knowledgeItems) {
+  let prompt = agent.prompt || "";
+  if (lead && lead.found) {
+    prompt += "\n\n[PERFIL DO CLIENTE]\n";
+    if (lead.name) prompt += `Nome: ${lead.name}\n`;
+    if (lead.score) prompt += `Engajamento: ${lead.score}/100\n`;
+    if (lead.stage) prompt += `Estágio no funil: ${lead.stage}\n`;
+    if (lead.utm_source) prompt += `Origem: ${lead.utm_source}${lead.utm_campaign ? ` / ${lead.utm_campaign}` : ""}\n`;
+    if (lead.qualification?.profile) prompt += `Perfil: ${lead.qualification.profile}\n`;
+    if (Number(lead.total_orders) > 0) {
+      prompt += `Compras: ${lead.total_orders} pedido(s)`;
+      if (lead.total_spent) prompt += ` | Total: R$${lead.total_spent}`;
+      prompt += "\n";
+      if (lead.last_order_product) prompt += `Último produto: ${lead.last_order_product}\n`;
+      if (lead.days_since_last_purchase != null) prompt += `Dias desde última compra: ${lead.days_since_last_purchase}\n`;
+    } else {
+      prompt += "Ainda não realizou nenhuma compra.\n";
+    }
+    if (lead.cart_abandoned) prompt += "Tem carrinho abandonado (não finalizou a compra).\n";
+    if (Array.isArray(lead.visited_pages) && lead.visited_pages.length) {
+      prompt += `Páginas visitadas recentemente: ${lead.visited_pages.slice(0, 5).join(", ")}\n`;
+    }
+  }
+  if (knowledgeItems.length > 0) {
+    prompt += "\n[BASE DE CONHECIMENTO]\n";
+    for (const item of knowledgeItems) {
+      prompt += `### ${item.title}\n${item.content}\n\n`;
+    }
+  }
+  return prompt;
+}
+
+// ── IA: Chamada direta ao Gemini ───────────────────────────────────────
+async function callGeminiDirect(apiKey, systemPrompt, history, userMessage, audioBase64 = null, audioMimeType = null) {
+  const contents = [];
+  for (const msg of history) {
+    contents.push({
+      role: msg.role === "assistant" ? "model" : "user",
+      parts: [{ text: msg.message }],
+    });
+  }
+  const userParts = [];
+  if (audioBase64 && audioMimeType) {
+    userParts.push({ inlineData: { mimeType: audioMimeType, data: audioBase64 } });
+    userParts.push({ text: "Transcreva e responda ao áudio como se fosse uma mensagem de texto do cliente." });
+  } else {
+    userParts.push({ text: userMessage || " " });
+  }
+  contents.push({ role: "user", parts: userParts });
+  const response = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
+    {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+    },
+    { timeout: 30000 }
+  );
+  return response.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+}
+
+// ── Campanha: Sync de leads do WordPress ──────────────────────────────
+async function syncLeadsFromWordPress(tenant) {
+  const pool = await getDbPool();
+  if (!pool || !tenant?.wp_url) return { synced: 0 };
+  let page = 1;
+  let total = 0;
+  const cacheTable = getTableName("leads_cache");
+  while (true) {
+    const response = await axios.get(
+      `${String(tenant.wp_url).replace(/\/$/, "")}/wp-json/alethe-crm/v1/leads`,
+      {
+        params: { page, limit: 200 },
+        headers: { Authorization: `Bearer ${tenant.api_key}` },
+        timeout: 30000,
+      }
+    );
+    const leads = response.data?.leads || (Array.isArray(response.data) ? response.data : []);
+    if (!Array.isArray(leads) || leads.length === 0) break;
+    for (const lead of leads) {
+      if (!lead.phone) continue;
+      await pool.execute(
+        `INSERT INTO \`${cacheTable}\`
+          (client_id, phone, email, name, score, stage, utm_source, utm_medium, utm_campaign,
+           cart_abandoned, total_orders, last_order_date, last_order_product, total_spent,
+           days_since_last_purchase, visited_pages_json, qualification_json, last_synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+          email=VALUES(email), name=VALUES(name), score=VALUES(score), stage=VALUES(stage),
+          utm_source=VALUES(utm_source), utm_medium=VALUES(utm_medium), utm_campaign=VALUES(utm_campaign),
+          cart_abandoned=VALUES(cart_abandoned), total_orders=VALUES(total_orders),
+          last_order_date=VALUES(last_order_date), last_order_product=VALUES(last_order_product),
+          total_spent=VALUES(total_spent), days_since_last_purchase=VALUES(days_since_last_purchase),
+          visited_pages_json=VALUES(visited_pages_json), qualification_json=VALUES(qualification_json),
+          last_synced_at=VALUES(last_synced_at)`,
+        [
+          tenant.client_id, lead.phone, lead.email || null, lead.name || null,
+          lead.score || 0, lead.stage || null, lead.utm_source || null,
+          lead.utm_medium || null, lead.utm_campaign || null,
+          lead.cart_abandoned ? 1 : 0, lead.total_orders || 0,
+          lead.last_order_date || null, lead.last_order_product || null,
+          lead.total_spent || 0, lead.days_since_last_purchase || null,
+          lead.visited_pages ? JSON.stringify(lead.visited_pages) : null,
+          lead.qualification ? JSON.stringify(lead.qualification) : null,
+          nowMysql(),
+        ]
+      );
+      total++;
+    }
+    if (leads.length < 200) break;
+    page++;
+  }
+  return { synced: total };
+}
+
+// ── Campanha: Montar lista com filtros ─────────────────────────────────
+async function buildCampaignList(campaignId) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  const campaignsTable = getTableName("campaigns");
+  const cacheTable = getTableName("leads_cache");
+  const recipientsTable = getTableName("campaign_recipients");
+  const [campaigns] = await pool.execute(`SELECT * FROM \`${campaignsTable}\` WHERE id = ?`, [campaignId]);
+  const campaign = campaigns[0];
+  if (!campaign) throw new Error("Campaign not found");
+  const filters = safeJsonParse(campaign.filter_params_json) || {};
+  const conditions = [];
+  const params = [];
+  if (campaign.client_id) { conditions.push("client_id = ?"); params.push(campaign.client_id); }
+  if (filters.inactive_days) { conditions.push("(last_order_date IS NULL OR last_order_date <= DATE_SUB(CURDATE(), INTERVAL ? DAY))"); params.push(Number(filters.inactive_days)); }
+  if (filters.abandoned_cart_days) { conditions.push("cart_abandoned = 1"); conditions.push("(last_order_date IS NULL OR last_order_date <= DATE_SUB(CURDATE(), INTERVAL ? DAY))"); params.push(Number(filters.abandoned_cart_days)); }
+  if (filters.viewed_product_slug) { conditions.push("visited_pages_json LIKE ?"); params.push(`%${filters.viewed_product_slug}%`); }
+  if (filters.never_purchased) conditions.push("total_orders = 0");
+  if (filters.score_min != null) { conditions.push("score >= ?"); params.push(Number(filters.score_min)); }
+  if (filters.score_max != null) { conditions.push("score <= ?"); params.push(Number(filters.score_max)); }
+  if (filters.stage) { conditions.push("stage = ?"); params.push(filters.stage); }
+  if (filters.utm_source) { conditions.push("utm_source = ?"); params.push(filters.utm_source); }
+  if (filters.min_orders) { conditions.push("total_orders >= ?"); params.push(Number(filters.min_orders)); }
+  if (filters.min_spent != null) { conditions.push("total_spent >= ?"); params.push(Number(filters.min_spent)); }
+  if (filters.max_spent != null) { conditions.push("total_spent <= ?"); params.push(Number(filters.max_spent)); }
+  const where = conditions.length ? " WHERE " + conditions.join(" AND ") : "";
+  const [leads] = await pool.execute(`SELECT * FROM \`${cacheTable}\`${where} ORDER BY score DESC LIMIT 10000`, params);
+  await pool.execute(`DELETE FROM \`${recipientsTable}\` WHERE campaign_id = ? AND status = 'pending'`, [campaignId]);
+  for (const lead of leads) {
+    await pool.execute(
+      `INSERT IGNORE INTO \`${recipientsTable}\` (campaign_id, client_id, phone, lead_name, status) VALUES (?, ?, ?, ?, 'pending')`,
+      [campaignId, lead.client_id, lead.phone, lead.name || null]
+    );
+  }
+  await pool.execute(`UPDATE \`${campaignsTable}\` SET total_in_list = ? WHERE id = ?`, [leads.length, campaignId]);
+  return { total: leads.length };
+}
+
+// ── Campanha: Enviar lote ──────────────────────────────────────────────
+async function sendCampaignBatch(campaignId, limit = 50) {
+  const pool = await getDbPool();
+  if (!pool) throw new Error("DB unavailable");
+  const campaignsTable = getTableName("campaigns");
+  const recipientsTable = getTableName("campaign_recipients");
+  const [campaigns] = await pool.execute(`SELECT * FROM \`${campaignsTable}\` WHERE id = ?`, [campaignId]);
+  const campaign = campaigns[0];
+  if (!campaign) throw new Error("Campaign not found");
+  const [recipients] = await pool.execute(
+    `SELECT * FROM \`${recipientsTable}\` WHERE campaign_id = ? AND status = 'pending' LIMIT ?`,
+    [campaignId, Number(limit)]
+  );
+  let sent = 0;
+  let failed = 0;
+  for (const recipient of recipients) {
+    try {
+      let payload;
+      if (campaign.message_type === "template" && campaign.template_name) {
+        payload = {
+          messaging_product: "whatsapp", to: recipient.phone, type: "template",
+          template: { name: campaign.template_name, language: { code: campaign.template_language || "pt_BR" } },
+        };
+      } else if (campaign.message_text) {
+        payload = {
+          messaging_product: "whatsapp", to: recipient.phone, type: "text",
+          text: { body: campaign.message_text, preview_url: false },
+        };
+      } else { continue; }
+      const data = await sendWhatsAppRequest(payload);
+      const messageId = data.messages?.[0]?.id || null;
+      await pool.execute(
+        `UPDATE \`${recipientsTable}\` SET status = 'sent', message_id = ?, sent_at = ? WHERE id = ?`,
+        [messageId, nowMysql(), recipient.id]
+      );
+      if (messageId) {
+        upsertTrackedMessage({ id: messageId, type: campaign.message_type === "template" ? "template" : "text",
+          to: recipient.phone, templateName: campaign.template_name || null,
+          acceptedAt: new Date().toISOString(), latestStatus: "accepted", apiAccepted: true });
+      }
+      sent++;
+    } catch (_err) {
+      await pool.execute(`UPDATE \`${recipientsTable}\` SET status = 'failed', failed_at = ? WHERE id = ?`, [nowMysql(), recipient.id]);
+      failed++;
+    }
+  }
+  await refreshCampaignTotals(campaignId);
+  const remaining = recipients.length - sent - failed;
+  return { sent, failed, remaining };
+}
+
+async function refreshCampaignTotals(campaignId) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  const recipientsTable = getTableName("campaign_recipients");
+  const campaignsTable = getTableName("campaigns");
+  const [rows] = await pool.execute(
+    `SELECT
+       SUM(status IN ('sent','delivered','read')) AS total_sent,
+       SUM(status = 'delivered') AS total_delivered,
+       SUM(status = 'read') AS total_read,
+       SUM(status = 'failed') AS total_failed
+     FROM \`${recipientsTable}\` WHERE campaign_id = ?`,
+    [campaignId]
+  );
+  const t = rows[0];
+  await pool.execute(
+    `UPDATE \`${campaignsTable}\` SET total_sent=?, total_delivered=?, total_read=?, total_failed=? WHERE id=?`,
+    [t.total_sent || 0, t.total_delivered || 0, t.total_read || 0, t.total_failed || 0, campaignId]
+  );
+}
+
+// ── Campanha: Atualizar status por webhook ─────────────────────────────
+async function updateCampaignRecipientFromWebhook(messageId, status) {
+  const pool = await getDbPool();
+  if (!pool || !messageId) return;
+  const recipientsTable = getTableName("campaign_recipients");
+  const fieldMap = { delivered: "delivered_at", read: "read_at", failed: "failed_at" };
+  const field = fieldMap[status];
+  if (!field) return;
+  const [updated] = await pool.execute(
+    `UPDATE \`${recipientsTable}\` SET status = ?, ${field} = ? WHERE message_id = ? AND status != 'read'`,
+    [status, nowMysql(), messageId]
+  );
+  if (updated.affectedRows === 0) return;
+  const [rows] = await pool.execute(
+    `SELECT DISTINCT campaign_id FROM \`${recipientsTable}\` WHERE message_id = ?`, [messageId]
+  );
+  for (const row of rows) await refreshCampaignTotals(row.campaign_id);
+}
+
+// =====================================================================
+// FIM DA SEÇÃO MULTI-TENANT E CAMPANHAS
+// =====================================================================
+
 router.get("/health", async (_req, res) => {
   try {
     validateConfig();
@@ -1112,6 +1818,7 @@ router.post("/webhook", (req, res) => {
         lastWebhookAt: status.timestamp,
         errors: status.errors,
       });
+      void updateCampaignRecipientFromWebhook(status.id, status.status);
     }
   }
 
@@ -1418,6 +2125,269 @@ router.get("/message-tracker", async (req, res) => {
 router.get("/logs", (_req, res) => {
   res.json({ success: true, logs });
 });
+
+// =====================================================================
+// ROTAS: MULTI-TENANT, AGENTES, KNOWLEDGE, CAMPANHAS
+// =====================================================================
+
+// ── Tenants ────────────────────────────────────────────────────────────
+router.get("/api/tenants", async (_req, res) => {
+  try { res.json({ success: true, tenants: await getTenants() }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/tenants", async (req, res) => {
+  try {
+    const { clientId, wpUrl, apiKey, active } = req.body || {};
+    if (!clientId || !wpUrl || !apiKey) return res.status(400).json({ success: false, error: "clientId, wpUrl e apiKey são obrigatórios." });
+    await upsertTenant({ clientId, wpUrl, apiKey, active });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.delete("/api/tenants/:clientId", async (req, res) => {
+  try { await deleteTenant(req.params.clientId); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Agentes ────────────────────────────────────────────────────────────
+router.get("/api/agents", async (_req, res) => {
+  try { res.json({ success: true, agents: await getAgents() }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/agents", async (req, res) => {
+  try {
+    const { name, prompt } = req.body || {};
+    if (!name || !prompt) return res.status(400).json({ success: false, error: "name e prompt são obrigatórios." });
+    await upsertAgent(req.body);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.delete("/api/agents/:id", async (req, res) => {
+  try { await deleteAgent(req.params.id); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Knowledge Base ─────────────────────────────────────────────────────
+router.get("/api/knowledge", async (req, res) => {
+  try {
+    const agentId = req.query.agent_id ? Number(req.query.agent_id) : null;
+    res.json({ success: true, items: await getKnowledgeItems(agentId) });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/knowledge", async (req, res) => {
+  try {
+    const { title, content } = req.body || {};
+    if (!title || !content) return res.status(400).json({ success: false, error: "title e content são obrigatórios." });
+    await upsertKnowledgeItem(req.body);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.delete("/api/knowledge/:id", async (req, res) => {
+  try { await deleteKnowledgeItem(req.params.id); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Conversas ──────────────────────────────────────────────────────────
+router.get("/api/conversations/:phone", async (req, res) => {
+  try {
+    const clientId = req.query.client_id || "";
+    const limit = Number(req.query.limit || 20);
+    const history = clientId
+      ? await getConversationHistory(clientId, req.params.phone, limit)
+      : [];
+    res.json({ success: true, history });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.delete("/api/conversations/:phone", async (req, res) => {
+  try {
+    await clearConversationHistory(req.params.phone, req.query.client_id || null);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Sync de Leads do WordPress ─────────────────────────────────────────
+router.post("/api/sync/leads/:clientId", async (req, res) => {
+  try {
+    const tenant = await getTenantById(req.params.clientId);
+    if (!tenant) return res.status(404).json({ success: false, error: "Tenant não encontrado." });
+    const result = await syncLeadsFromWordPress(tenant);
+    addLog("leads_sync", `Sync de leads do tenant ${req.params.clientId} concluído.`, result);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    addLog("leads_sync_error", "Falha no sync de leads.", e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get("/api/leads/:clientId", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.status(503).json({ success: false, error: "DB unavailable" });
+    const [rows] = await pool.execute(
+      `SELECT * FROM \`${getTableName("leads_cache")}\` WHERE client_id = ? ORDER BY score DESC LIMIT 500`,
+      [req.params.clientId]
+    );
+    res.json({ success: true, leads: rows, total: rows.length });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Campanhas ──────────────────────────────────────────────────────────
+router.get("/api/campaigns", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.status(503).json({ success: false, error: "DB unavailable" });
+    const clientId = req.query.client_id;
+    let rows;
+    if (clientId) {
+      [rows] = await pool.execute(
+        `SELECT * FROM \`${getTableName("campaigns")}\` WHERE client_id = ? OR client_id IS NULL ORDER BY created_at DESC`,
+        [clientId]
+      );
+    } else {
+      [rows] = await pool.query(`SELECT * FROM \`${getTableName("campaigns")}\` ORDER BY created_at DESC`);
+    }
+    res.json({ success: true, campaigns: rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/campaigns", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.status(503).json({ success: false, error: "DB unavailable" });
+    const { name, clientId, description, filterParams, messageType, messageText, templateName, templateLanguage } = req.body || {};
+    if (!name) return res.status(400).json({ success: false, error: "name é obrigatório." });
+    const id = req.body.id;
+    if (id) {
+      await pool.execute(
+        `UPDATE \`${getTableName("campaigns")}\` SET name=?, client_id=?, description=?, filter_params_json=?,
+         message_type=?, message_text=?, template_name=?, template_language=? WHERE id=?`,
+        [name, clientId || null, description || null,
+          JSON.stringify(filterParams || {}), messageType || "text",
+          messageText || null, templateName || null, templateLanguage || "pt_BR", id]
+      );
+    } else {
+      const [result] = await pool.execute(
+        `INSERT INTO \`${getTableName("campaigns")}\` (name, client_id, description, filter_params_json, message_type, message_text, template_name, template_language)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [name, clientId || null, description || null,
+          JSON.stringify(filterParams || {}), messageType || "text",
+          messageText || null, templateName || null, templateLanguage || "pt_BR"]
+      );
+      res.json({ success: true, id: result.insertId });
+      return;
+    }
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.get("/api/campaigns/:id", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.status(503).json({ success: false, error: "DB unavailable" });
+    const [rows] = await pool.execute(`SELECT * FROM \`${getTableName("campaigns")}\` WHERE id = ?`, [req.params.id]);
+    if (!rows.length) return res.status(404).json({ success: false, error: "Campanha não encontrada." });
+    res.json({ success: true, campaign: rows[0] });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.delete("/api/campaigns/:id", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.status(503).json({ success: false, error: "DB unavailable" });
+    await pool.execute(`DELETE FROM \`${getTableName("campaign_recipients")}\` WHERE campaign_id = ?`, [req.params.id]);
+    await pool.execute(`DELETE FROM \`${getTableName("campaigns")}\` WHERE id = ?`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/campaigns/:id/preview", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.status(503).json({ success: false, error: "DB unavailable" });
+    const [campaigns] = await pool.execute(`SELECT * FROM \`${getTableName("campaigns")}\` WHERE id = ?`, [req.params.id]);
+    const campaign = campaigns[0];
+    if (!campaign) return res.status(404).json({ success: false, error: "Campanha não encontrada." });
+    const filters = safeJsonParse(campaign.filter_params_json) || {};
+    const conditions = [];
+    const params = [];
+    if (campaign.client_id) { conditions.push("client_id = ?"); params.push(campaign.client_id); }
+    if (filters.inactive_days) { conditions.push("(last_order_date IS NULL OR last_order_date <= DATE_SUB(CURDATE(), INTERVAL ? DAY))"); params.push(Number(filters.inactive_days)); }
+    if (filters.abandoned_cart_days) { conditions.push("cart_abandoned = 1"); }
+    if (filters.viewed_product_slug) { conditions.push("visited_pages_json LIKE ?"); params.push(`%${filters.viewed_product_slug}%`); }
+    if (filters.never_purchased) conditions.push("total_orders = 0");
+    if (filters.score_min != null) { conditions.push("score >= ?"); params.push(Number(filters.score_min)); }
+    if (filters.score_max != null) { conditions.push("score <= ?"); params.push(Number(filters.score_max)); }
+    if (filters.stage) { conditions.push("stage = ?"); params.push(filters.stage); }
+    if (filters.utm_source) { conditions.push("utm_source = ?"); params.push(filters.utm_source); }
+    if (filters.min_orders) { conditions.push("total_orders >= ?"); params.push(Number(filters.min_orders)); }
+    const where = conditions.length ? " WHERE " + conditions.join(" AND ") : "";
+    const [rows] = await pool.execute(
+      `SELECT phone, name, score, stage, total_orders, total_spent, last_order_date FROM \`${getTableName("leads_cache")}\`${where} ORDER BY score DESC LIMIT 50`,
+      params
+    );
+    const [[{ total }]] = await pool.execute(`SELECT COUNT(*) AS total FROM \`${getTableName("leads_cache")}\`${where}`, params);
+    res.json({ success: true, total, sample: rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/campaigns/:id/build-list", async (req, res) => {
+  try {
+    const result = await buildCampaignList(req.params.id);
+    res.json({ success: true, ...result });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/campaigns/:id/send", async (req, res) => {
+  try {
+    validateConfig();
+    const limit = Number(req.body?.limit || 50);
+    const result = await sendCampaignBatch(req.params.id, limit);
+    addLog("campaign_send", `Envio de campanha ${req.params.id} executado.`, result);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    addLog("campaign_error", "Falha ao enviar campanha.", e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get("/api/campaigns/:id/results", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.status(503).json({ success: false, error: "DB unavailable" });
+    const [campaign] = await pool.execute(`SELECT * FROM \`${getTableName("campaigns")}\` WHERE id = ?`, [req.params.id]);
+    if (!campaign.length) return res.status(404).json({ success: false, error: "Campanha não encontrada." });
+    const limit = Number(req.query.limit || 100);
+    const [recipients] = await pool.execute(
+      `SELECT id, phone, lead_name, status, message_id, sent_at, delivered_at, read_at, failed_at, skip_reason
+       FROM \`${getTableName("campaign_recipients")}\`
+       WHERE campaign_id = ? ORDER BY created_at DESC LIMIT ?`,
+      [req.params.id, limit]
+    );
+    res.json({
+      success: true,
+      campaign: campaign[0],
+      recipients,
+      stats: {
+        total_in_list: campaign[0].total_in_list,
+        total_sent: campaign[0].total_sent,
+        total_delivered: campaign[0].total_delivered,
+        total_read: campaign[0].total_read,
+        total_failed: campaign[0].total_failed,
+        pending: campaign[0].total_in_list - campaign[0].total_sent - campaign[0].total_failed,
+      },
+    });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// =====================================================================
+// FIM DAS ROTAS MULTI-TENANT E CAMPANHAS
+// =====================================================================
 
 app.use(appBasePath, router);
 
