@@ -1071,6 +1071,14 @@ async function handleIncomingMessageWithAssistant(message) {
       const leadContext = await fetchLeadContextFromWP(tenant, message.from).catch(() => null);
       const history = await getConversationHistory(tenant.client_id, message.from, 10);
       const knowledgeItems = getRelevantKnowledge(await getKnowledgeItems(agent.id), userText);
+      // Declara audioBase64 antes de qualquer uso
+      let audioBase64 = null;
+      let audioMimeType = null;
+      if (message.type === "audio" && message.audioId) {
+        const audio = await downloadWhatsAppMedia(message.audioId).catch(() => null);
+        if (audio) { audioBase64 = audio.base64; audioMimeType = audio.mimeType; }
+      }
+
       // ── Camada de intenção + ferramentas ──────────────────────────
       const convState  = await getConvState(message.from, tenant.client_id);
       // ── Seleção de produto via botão/lista interativa ─────────────
@@ -1158,12 +1166,6 @@ async function handleIncomingMessageWithAssistant(message) {
         }
       }
       const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems, tools);
-      let audioBase64 = null;
-      let audioMimeType = null;
-      if (message.type === "audio" && message.audioId) {
-        const audio = await downloadWhatsAppMedia(message.audioId).catch(() => null);
-        if (audio) { audioBase64 = audio.base64; audioMimeType = audio.mimeType; }
-      }
       const reply = await callGeminiDirect(geminiApiKey, systemPrompt, history, userText, audioBase64, audioMimeType);
       if (!reply) {
         addLog("assistant_skip", "Gemini nao retornou resposta.", { from: message.from });
