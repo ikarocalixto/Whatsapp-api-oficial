@@ -283,6 +283,24 @@ async function ensurePersistenceTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
+  // ── Tabela de estado de conversa (intenção, carrinho, verificação) ──────
+  const convStateTable = getTableName("conversation_state");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${convStateTable}\` (
+      phone VARCHAR(30) NOT NULL,
+      client_id VARCHAR(100) NOT NULL,
+      verified_email VARCHAR(191) DEFAULT NULL,
+      verified_customer_id INT DEFAULT NULL,
+      verified_at DATETIME DEFAULT NULL,
+      cart_json LONGTEXT DEFAULT NULL,
+      awaiting VARCHAR(60) DEFAULT NULL,
+      last_order_id INT DEFAULT NULL,
+      context_json LONGTEXT DEFAULT NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (phone, client_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
   // ── Tabelas do sistema multi-tenant e IA ────────────────────────────────
   const tenantsTable = getTableName("tenants");
   const agentsTable = getTableName("agents");
@@ -1052,7 +1070,37 @@ async function handleIncomingMessageWithAssistant(message) {
       const leadContext = await fetchLeadContextFromWP(tenant, message.from).catch(() => null);
       const history = await getConversationHistory(tenant.client_id, message.from, 10);
       const knowledgeItems = getRelevantKnowledge(await getKnowledgeItems(agent.id), userText);
-      const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems);
+      // ── Camada de intenção + ferramentas ──────────────────────────
+      const convState  = await getConvState(message.from, tenant.client_id);
+      const intent     = detectIntent(userText);
+      const tools      = await executeTools(intent, userText, tenant, leadContext, convState);
+      // Salva estado se precisar de e-mail (aguardando verificação)
+      if (tools.needs_email && convState.awaiting !== "email_for_orders") {
+        await setConvState(message.from, tenant.client_id, { awaiting: "email_for_orders" });
+      }
+      // Se o cliente está aguardando verificação e a mensagem parece um e-mail
+      if (convState.awaiting === "email_for_orders" && /\S+@\S+\.\S+/.test(userText)) {
+        const emailMatch = userText.match(/[\w.-]+@[\w.-]+\.[a-z]{2,}/i);
+        if (emailMatch) {
+          const verif = await verifyCustomer(tenant, message.from, emailMatch[0]).catch(() => null);
+          if (verif?.verified) {
+            await setConvState(message.from, tenant.client_id, {
+              verified_email: emailMatch[0],
+              verified_customer_id: verif.customer_id || null,
+              verified_at: new Date().toISOString().slice(0, 19).replace("T", " "),
+              awaiting: null,
+            });
+            const orderData = await getOrderTracking(tenant, message.from, emailMatch[0]).catch(() => null);
+            if (orderData?.found) tools.orders = orderData.orders;
+            else tools.no_orders = true;
+            tools.needs_email = false;
+          } else {
+            tools.needs_email = false;
+            tools.email_not_found = true;
+          }
+        }
+      }
+      const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems, tools);
       let audioBase64 = null;
       let audioMimeType = null;
       if (message.type === "audio" && message.audioId) {
@@ -1504,7 +1552,7 @@ function getRelevantKnowledge(items, messageText, limit = 5) {
 }
 
 // ── IA: Prompt personalizado ───────────────────────────────────────────
-function buildPersonalizedPrompt(agent, lead, knowledgeItems) {
+function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}) {
   let prompt = agent.prompt || "";
 
   // ── Perfil do lead (dados do WordPress) ──
@@ -1551,6 +1599,52 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems) {
     for (const item of knowledgeItems) {
       prompt += `### ${item.title}\n${item.content}\n\n`;
     }
+  }
+
+  // ── Resultados das ferramentas (dados em tempo real) ──
+  if (tools.products?.length) {
+    prompt += "\n[PRODUTOS ENCONTRADOS — dados reais do WooCommerce, use estes e não invente]\n";
+    tools.products.forEach((p) => {
+      prompt += `• ${p.name} — ${p.price_formatted}`;
+      if (p.on_sale && p.regular_price) prompt += ` (de ${p.regular_price})`;
+      prompt += p.in_stock ? ` ✅ em estoque` : ` ❌ fora de estoque`;
+      if (p.stock_quantity) prompt += ` (${p.stock_quantity} unidades)`;
+      prompt += `\n  🔗 ${p.url}\n`;
+      if (p.short_description) prompt += `  ${p.short_description.slice(0, 120)}\n`;
+      if (p.variations?.length) {
+        prompt += `  Variações disponíveis:\n`;
+        p.variations.forEach((v) => { prompt += `    - ${v.name}: ${v.price_formatted}${v.in_stock ? "" : " (sem estoque)"}\n`; });
+      }
+    });
+    prompt += "IMPORTANTE: Use exatamente os preços e links acima. Nunca invente preço.\n";
+  }
+
+  if (tools.orders?.length) {
+    prompt += "\n[PEDIDOS DO CLIENTE — dados reais]\n";
+    tools.orders.forEach((o) => {
+      prompt += `• Pedido #${o.number} — ${o.status_label} — ${o.total} (${o.date})\n`;
+      prompt += `  Itens: ${(o.items || []).join(", ")}\n`;
+      prompt += `  Frete: ${o.shipping_method}\n`;
+      if (o.tracking_code) {
+        prompt += `  🚚 Rastreio: ${o.tracking_code}\n`;
+        prompt += `  🔗 Link de rastreio: ${o.tracking_url}\n`;
+      } else {
+        prompt += `  Rastreio: ainda não disponível\n`;
+      }
+      if (o.payment_url) prompt += `  💳 Link de pagamento: ${o.payment_url}\n`;
+    });
+  }
+
+  if (tools.no_orders) {
+    prompt += "\n[PEDIDOS] Nenhum pedido encontrado para este cliente.\n";
+  }
+
+  if (tools.needs_email) {
+    prompt += "\n[AÇÃO NECESSÁRIA] Para consultar pedidos e rastreio, peça o e-mail cadastrado do cliente para verificar a identidade antes de mostrar qualquer dado de pedido.\n";
+  }
+
+  if (tools.order_created) {
+    prompt += `\n[PEDIDO CRIADO] Pedido #${tools.order_created.order_number} criado com sucesso!\nTotal: ${tools.order_created.total}\nItens: ${(tools.order_created.items || []).join(", ")}\n💳 Link de pagamento: ${tools.order_created.payment_url}\nDiga ao cliente que o pedido foi criado e envie o link para ele pagar.\n`;
   }
 
   // ── Instrução de contexto de conversa ──
@@ -1643,6 +1737,149 @@ async function getRecentConversations(clientId = null, limit = 50) {
   params.push(Number(limit));
   const [rows] = await pool.execute(sql, params);
   return rows;
+}
+
+// ── Estado de conversa (intenção, carrinho, verificação) ──────────────
+async function getConvState(phone, clientId) {
+  const pool = await getDbPool();
+  if (!pool) return {};
+  const [rows] = await pool.execute(
+    `SELECT * FROM \`${getTableName("conversation_state")}\` WHERE phone=? AND client_id=?`,
+    [phone, clientId]
+  );
+  const row = rows[0] || {};
+  return {
+    ...row,
+    cart: safeJsonParse(row.cart_json) || [],
+    context: safeJsonParse(row.context_json) || {},
+  };
+}
+
+async function setConvState(phone, clientId, patch) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  const fields = {};
+  if ('verified_email' in patch) fields.verified_email = patch.verified_email;
+  if ('verified_customer_id' in patch) fields.verified_customer_id = patch.verified_customer_id;
+  if ('verified_at' in patch) fields.verified_at = patch.verified_at;
+  if ('awaiting' in patch) fields.awaiting = patch.awaiting;
+  if ('last_order_id' in patch) fields.last_order_id = patch.last_order_id;
+  if ('cart' in patch) fields.cart_json = JSON.stringify(patch.cart);
+  if ('context' in patch) fields.context_json = JSON.stringify(patch.context);
+  if (Object.keys(fields).length === 0) return;
+  const setClauses = Object.keys(fields).map(k => `\`${k}\` = ?`).join(', ');
+  const values = [...Object.values(fields), phone, clientId];
+  await pool.execute(
+    `INSERT INTO \`${getTableName("conversation_state")}\` (phone, client_id, ${Object.keys(fields).join(', ')})
+     VALUES (?, ?, ${Object.keys(fields).map(() => '?').join(', ')})
+     ON DUPLICATE KEY UPDATE ${setClauses}`,
+    [phone, clientId, ...Object.values(fields), ...Object.values(fields)]
+  );
+}
+
+async function clearConvState(phone, clientId) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(
+    `DELETE FROM \`${getTableName("conversation_state")}\` WHERE phone=? AND client_id=?`,
+    [phone, clientId]
+  );
+}
+
+// ── Detecção de intenção ────────────────────────────────────────────────
+function detectIntent(message) {
+  const m = (message || "").toLowerCase();
+  // Rastreio / pedido
+  if (/pedido|rastreio|rastreamento|entrega|chegou|cad[eê]|onde[. ]+est[aá]|status.*pedido|meu.*pedido|acompanhar|prazo.*entrega/i.test(m)) {
+    return "order_inquiry";
+  }
+  // Intenção de compra clara
+  if (/quero\s+(comprar|pedir|encomendar)|quero\s+\d|adicionar|finalizar.*compra|checkout|pagar|uni(dade|des)|monte.*pedido|faz.*pedido|coloca.*pedido/i.test(m)) {
+    return "purchase_intent";
+  }
+  // Consulta de produto
+  if (/pre[çc]o|quanto\s+custa|valor|tem\s+.{1,30}(disponível|disponivel|em\s+estoque)|estoque|produto|perfume|kit|quanto\s+é|quanto\s+ta|quanto\s+tá|ml\b|envia|link\s+(do|da)|me\s+manda\s+o\s+link/i.test(m)) {
+    return "product_inquiry";
+  }
+  return "conversational";
+}
+
+// ── Funções que chamam as ferramentas no WordPress ──────────────────────
+async function wpToolCall(tenant, path, method = "GET", body = null) {
+  if (!tenant?.wp_url || !tenant?.api_key) return null;
+  try {
+    const opts = {
+      method,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tenant.api_key}` },
+      timeout: 12000,
+    };
+    if (body && method !== "GET") opts.data = body;
+    const url = `${String(tenant.wp_url).replace(/\/$/, "")}/wp-json/alethe-crm/v1${path}`;
+    const response = method === "GET"
+      ? await axios.get(url, { headers: opts.headers, timeout: opts.timeout })
+      : await axios.post(url, body, { headers: opts.headers, timeout: opts.timeout });
+    return response.data;
+  } catch (_) { return null; }
+}
+
+async function searchProducts(tenant, query) {
+  if (!query || query.length < 2) return null;
+  return wpToolCall(tenant, `/product-search?q=${encodeURIComponent(query)}&limit=5`);
+}
+
+async function getOrderTracking(tenant, phone, email) {
+  const params = [];
+  if (phone) params.push(`phone=${encodeURIComponent(phone)}`);
+  if (email) params.push(`email=${encodeURIComponent(email)}`);
+  if (!params.length) return null;
+  return wpToolCall(tenant, `/order-tracking?${params.join("&")}`);
+}
+
+async function verifyCustomer(tenant, phone, email) {
+  return wpToolCall(tenant, "/customer-verify", "POST", { phone, email });
+}
+
+async function createOrder(tenant, phone, email, name, items) {
+  return wpToolCall(tenant, "/create-order", "POST", { phone, email, name, items });
+}
+
+// ── Extrai possíveis nomes de produtos da mensagem (heurística simples) ──
+function extractProductQuery(message) {
+  const m = message || "";
+  // Remove palavras comuns de intenção e retorna o restante como query
+  return m.replace(/\b(preço|preco|quanto|custa|valor|tem|disponível|disponivel|quero|me\s+manda|link\s+(do|da)|enviar?|informa[çc][aã]o)\b/gi, "").replace(/[?!.,;]/g, "").trim().slice(0, 80);
+}
+
+// ── Executa ferramentas baseado na intenção ────────────────────────────
+async function executeTools(intent, message, tenant, leadContext, convState) {
+  const results = { intent };
+
+  if (intent === "product_inquiry" || intent === "purchase_intent") {
+    const query = extractProductQuery(message);
+    if (query.length >= 2) {
+      const data = await searchProducts(tenant, query);
+      if (data?.products?.length) results.products = data.products;
+    }
+  }
+
+  if (intent === "order_inquiry") {
+    // Verifica se o cliente já confirmou identidade
+    if (convState.verified_email || leadContext?.email) {
+      const email = convState.verified_email || leadContext?.email;
+      const phone = leadContext?.phone || null;
+      const data = await getOrderTracking(tenant, phone, email);
+      if (data?.found) {
+        results.orders = data.orders;
+      } else {
+        results.no_orders = true;
+      }
+    } else {
+      // Precisa verificar identidade primeiro
+      results.needs_email = true;
+    }
+  }
+
+  return results;
 }
 
 // ── Campanha: Sync de leads do WordPress ──────────────────────────────
@@ -2486,7 +2723,7 @@ router.get("/api/campaigns/:id/results", async (req, res) => {
 });
 
 // ── Atendimento humano: listar conversas recentes ─────────────────────
-router.get("/api/conversations/recent", async (req, res) => {
+router.get("/api/conversations-recent", async (req, res) => {
   try {
     const clientId = req.query.client_id || null;
     const limit    = Number(req.query.limit || 50);
