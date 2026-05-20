@@ -1967,63 +1967,73 @@ async function clearConvState(phone, clientId) {
 
 // ── Detecção de intenção ────────────────────────────────────────────────
 function detectIntent(message) {
-  const m = (message || "").toLowerCase().trim();
+  const m   = (message || "").toLowerCase().trim();
+  const raw = m.replace(/[?!.,;:]/g, "").trim();
 
-  // ── Padrões de rastreio/pedido ────────────────────────────────────
-  if (/pedido|rastreio|rastreamento|entrega|chegou|cad[eê]|onde\s+est[aá]|onde\s+t[aá]|status\s+d[oa]\s+pedido|meu\s+pedido|acompanhar|prazo\s+de\s+entrega|foi\s+enviado|saiu\s+pra\s+entrega|enviaram|postaram|correio/i.test(m)) {
+  // ── 1. Rastreio de pedido ─────────────────────────────────────────
+  if (/\b(pedido|rastreio|rastreamento|entrega|chegou|cad[eê]|onde\s+(est[aá]|t[áa])\s+(meu|o)|meu\s+pedido|acompanhar|prazo\s+de\s+entrega|foi\s+enviado|saiu\s+pra\s+entrega|postaram)\b/i.test(m)) {
     return "order_inquiry";
   }
 
-  // ── Carrinho ─────────────────────────────────────────────────────
-  if (/carrinho|limpar\s+(o\s+)?carrinho|esvaziar|cancela\s+(o\s+)?(pedido|carrinho)|remover\s+d[oa]\s+carrinho|o\s+que\s+(tem|t[áa])\s+n[oa]\s+(meu\s+)?carrinho|meus?\s+pedidos?\s+pendente|ver\s+(o\s+)?carrinho|o\s+que\s+eu\s+(coloquei|adicionei)|pedido\s+pendente/i.test(m)) {
-    if (/limpar|esvaziar|cancela|remover|apagar|deletar|n[aã]o\s+quero\s+mais/i.test(m)) return "cart_clear";
-    return "cart_inquiry";
+  // ── 2. Carrinho ──────────────────────────────────────────────────
+  if (/\b(carrinho|pedidos?\s+pendentes?|o\s+que\s+(tem|tá)\s+n[oa]\s+(meu\s+)?carrinho)\b/i.test(m)) {
+    return /\b(limpar|esvaziar|cancela|cancelar|remover|n[aã]o\s+quero\s+mais)\b/i.test(m) ? "cart_clear" : "cart_inquiry";
   }
 
-  // ── Intenção de compra ────────────────────────────────────────────
-  if (/quero\s+(comprar|pedir|encomendar|\d+\s*(unidade|un\b|kit|peça))|finalizar\s*(compra|pedido)|checkout|quero\s+pagar|vou\s+(levar|comprar|pegar)|coloca\s+n[oa]\s+pedido|monte\s+um\s+pedido|faz\s+um\s+pedido|adicionar\s+ao\s+carrinho|\d+\s+unidade/i.test(m)) {
+  // ── 3. Compra explícita ───────────────────────────────────────────
+  if (/\b(finalizar\s*(compra|pedido)|checkout|fazer\s+o\s+pedido|adicionar\s+ao\s+carrinho)\b|\bquero\s+(comprar|pedir|pagar)\b|\b\d+\s*(unidades?|peças?|kits?)\b/i.test(m)) {
     return "purchase_intent";
   }
 
-  // ── Consulta de produto — palavras de preço/valor ────────────────
-  if (/pre[çc][o0]|pr[e3][çc][o0]|qto\s+cust|quanto\s*cust\w*|cust\w+\s+quanto|cust[ao]\b|valor|v[a4]lor|vlr\b|quanto\s+[ée]\b|quanto\s+t[áa]\b|t[áa]\s+(custando|saindo|valendo)|qto\s+[ée]\b|quanto\s+fica|fica\s+quanto|sai\s+por\s+quanto/i.test(m)) {
-    return "product_inquiry";
-  }
-
-  // ── Consulta de produto — disponibilidade ───────────────────────
-  if (/dispon[ií]vel|em\s+estoque|tem\s+estoque|t[eê]m?\s+.{1,50}\?|voc[eê]s?\s+t[eê]m?\b|vcs\s+tem\b|voc[eê]\s+tem\b|tem\s+(esse|essa|este|esta|o\s+|a\s+)\b|tem\s+\w+\s*(disponível|\?)|\btem\b.*\?/i.test(m)) {
-    return "product_inquiry";
-  }
-
-  // ── Consulta de produto — categorias e formatos ──────────────────
-  if (/perfume|parfum|fragrân|fragranc|colônia|colonia|eau\s+de\s+(parfum|toilette|cologne)|edp\b|edt\b|edc\b|aromatizante|\d+\s*ml\b|ml\b|oz\b|kit\s+|miniatura|decant|body\s+splash|hidratante|creme\s+corporal|desodorante|sabonete/i.test(m)) {
-    return "product_inquiry";
-  }
-
-  // ── Consulta de produto — outras formas de pedir ────────────────
-  if (/me\s+manda\s+(o\s+)?link|manda\s+(a\s+)?foto|mostra\s+(o\s+|a\s+)?produto|link\s+d[oa]\s+produto|me\s+passa\s+o\s+link|qual\s+o\s+link|link\s+do\s+(produto|perfume|kit)|manda\s+(o\s+)?link|envia\s+o\s+link|foto\s+d[oa]|imagem\s+d[oa]/i.test(m)) {
-    return "product_inquiry";
-  }
-
-  // ── Confirmação de seleção anterior (responde a uma pergunta do bot) ─
-  if (/^(quero\s*$|sim\s*$|pode\s*$|pode\s+ser\s*$|isso\s*$|esse\s*mesmo\s*$|confirmo\s*$|ok\s*$|fechou\s*$|bora\s*$|vai\s*$|add\s*$|adiciona\s*$|coloca\s*$|faz\s+(o\s+)?pedido\s*$|comprar\s*$|boa\s*$)/i.test(m.trim())) {
+  // ── 4. Confirmação curta (resposta ao bot) ───────────────────────
+  if (/^(quero|sim|pode|pode\s+ser|isso|esse\s+mesmo|confirmo|ok|fechou|bora|add|adiciona|coloca|comprar|boa|exato|isso\s+mesmo|quero\s+sim|pode\s+sim)[\s!.]*$/.test(raw)) {
     return "confirm_selection";
   }
 
-  // ── Resposta de quantidade (só número ou palavra numeral) ──────────
-  if (/^(\d{1,2}|um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez)\s*(unidade|peça|kit|exemplar|par)s?\s*$/.test(m.trim()) || /^\d{1,2}\s*$/.test(m.trim())) {
+  // ── 5. Quantidade isolada ─────────────────────────────────────────
+  if (/^\d{1,2}$/.test(raw) || /^(um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez)$/.test(raw)) {
     return "quantity_response";
   }
 
-  // ── Detecta nomes de produtos isolados (mensagens curtas sem saudação) ──
-  const stripped = m.replace(/[?!.,;:]/g, "").trim();
-  const words = stripped.split(/\s+/).filter(Boolean);
-  const isSmallTalk = /^(oi\b|ol[áa]\b|hey\b|eae\b|e\s+a[íi]\b|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+(bem|bom|certo|ok)|td\s+bem|valeu|obrigad\w*|obg\b|vlw\b|ok\b|certo\b|n[aã]o\b|perfeito\b|ótimo\b|otimo\b|show\b|beleza\b|at[eé]\s+mais|tchau\b|flw\b|abs\b|bjss?\b|pode\s+(ser|sim)\b|claro\b|com\s+certeza|entend\w+|compreend\w+)/i.test(stripped);
-  const isOpenQuestion = /^(pode\s+me\s+ajudar|consegue\s+me\s+ajudar|preciso\s+de\s+ajuda|como\s+funciona|como\s+compro|onde\s+compro|como\s+faço|qual\s+[ée]\s+o\s+site|vocês\s+(vendem|trabalham|fazem|são)|o\s+que\s+(vocês?\s+vendem|é\s+a\s+loja)|faz\s+entrega)/i.test(stripped);
+  // ── 6. Pergunta de preço/valor — REQUER PALAVRA DE PREÇO ─────────
+  if (/\b(pre[çc]o|preco|quanto\s+cust|cust[ao]\b|quanto\s+(vale|[ée]|t[áa]|fica)|valor|vlr\b|barato|caro|promoç|desconto|sai\s+por)\b/i.test(m)) {
+    return "product_inquiry";
+  }
 
-  if (!isSmallTalk && !isOpenQuestion && words.length >= 1 && words.length <= 8) {
-    const hasSubstantive = words.some(w => w.length >= 3 && !/^(de|do|da|dos|das|em|no|na|por|com|sem|que|uma|uns|umas|pra|pro|pros|pras|ate|atè)$/.test(w));
-    if (hasSubstantive) return "product_inquiry";
+  // ── 7. Disponibilidade — REQUER PALAVRA DE DISPONIBILIDADE ───────
+  if (/\b(dispon[ií]vel|em\s+estoque|tem\s+disponível|voc[eê]s?\s+t[eê]m\b|vcs\s+tem\b)\b/i.test(m)) {
+    return "product_inquiry";
+  }
+
+  // ── 8. Categoria de produto — palavras específicas de perfumaria ──
+  if (/\b(perfume|parfum|fragrân\w*|eau\s+de\s+(parfum|toilette|cologne)|edp\b|edt\b|edc\b|miniatura|decant|body\s+splash|colônia|colonia)\b|\b\d{2,3}\s*ml\b/i.test(m)) {
+    return "product_inquiry";
+  }
+
+  // ── 9. Solicitação de foto/link ───────────────────────────────────
+  if (/\b(me\s+manda|manda\s+a|mostra)\b.{0,20}\b(foto|imagem|link|produto)\b|\blink\s+d[oa]\s+(produto|perfume)\b/i.test(m)) {
+    return "product_inquiry";
+  }
+
+  // ── 10. Nome de produto isolado (conservador) ─────────────────────
+  // Só detecta como produto se: 2-4 palavras E nenhuma delas é conversacional
+  // Ex: "asad elixir" ✅ | "la vie est belle" ✅ | "ola tudo bem" ❌
+  const words = raw.split(/\s+/).filter(Boolean);
+  const CONVERSATIONAL = new Set([
+    "oi","ola","olá","hey","eae","bom","boa","bem","tudo","graças","obrigado","obrigada",
+    "obg","vlw","valeu","ok","certo","sim","não","nao","pode","quero","preciso","gosto",
+    "adoro","seria","ajuda","mais","outro","outra","coisa","aqui","lá","so","só","também",
+    "tbm","pra","pro","quando","onde","quem","porque","qual","quais","posso","consigo",
+    "tenho","vou","estou","como","vai","que","tal","me","meu","minha","seu","sua",
+    "um","uma","uns","umas","de","do","da","dos","das","em","no","na","e","é","a","o",
+    "as","os","por","para","com","sem","mas","se","já","né","ué","hm","ah","ih","ih",
+    "oba","wow","uau","nossa","legal","show","blz","beleza","isso","esse","essa",
+    "esses","essas","este","esta","estes","estas","aquele","aquela","muito","pouco",
+    "tô","tá","ta","né","hein","heim","cara","mano","gente","pessoal","amiga","amigo"
+  ]);
+  if (words.length >= 2 && words.length <= 4) {
+    const allProductWords = words.every(w => !CONVERSATIONAL.has(w.toLowerCase()) && w.length >= 2);
+    if (allProductWords) return "product_inquiry";
   }
 
   return "conversational";
