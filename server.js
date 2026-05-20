@@ -1235,28 +1235,30 @@ async function handleIncomingMessageWithAssistant(message) {
       await sendTextMessagesInSequence(message.from, chunkMessage(reply, 1000));
 
       // ── Mídia e interatividade pós-resposta ───────────────────────
-      if (tools.products?.length === 1) {
-        // 1 produto → envia foto (só formatos suportados pelo WhatsApp)
+      if (tools.products?.length >= 1) {
         const p = tools.products[0];
         const imgUrl = p.image;
         const isSupported = imgUrl && /\.(jpe?g|jpg|png|webp)(\?.*)?$/i.test(imgUrl);
+
+        // Sempre envia a foto do primeiro produto encontrado
         if (isSupported) {
-          const caption = `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}\n${p.in_stock ? "✅ Em estoque" : "❌ Esgotado"}\n🔗 ${p.url}`;
-          sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: imgUrl, caption: caption.slice(0, 1024) } }).catch(() => {});
+          const caption = tools.products.length === 1
+            ? `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}`
+            : `${p.name}\n💰 ${p.price_formatted}${p.on_sale ? ` (${p.discount_percent} off)` : ""}\n+ ${tools.products.length - 1} outra(s) opção(ões) abaixo 👇`;
+          await sendWhatsAppRequest({
+            messaging_product: "whatsapp",
+            to: message.from,
+            type: "image",
+            image: { link: imgUrl, caption: caption.slice(0, 1024) },
+          }).catch((e) => addLog("image_error", "Falha ao enviar foto.", { url: imgUrl, error: e.response?.data || e.message }));
         }
-      } else if (tools.products?.length >= 2) {
-        // 2+ produtos → envia lista/botões interativos para seleção
-        const selectionPrompt = tools.products.length === 2
-          ? "Encontrei 2 opções. Qual você quer?"
-          : `Encontrei ${tools.products.length} opções de "${extractProductQuery(userText)}". Qual você quer?`;
-        // Pequena pausa para o texto chegar antes dos botões
-        await new Promise((r) => setTimeout(r, 800));
-        sendProductSelectionMessage(message.from, tools.products, selectionPrompt).catch(() => {
-          // Fallback: envia foto do primeiro produto (apenas formatos suportados)
-          const p = tools.products[0];
-          const isSupported = p.image && /\.(jpe?g|jpg|png|webp)(\?.*)?$/i.test(p.image);
-          if (isSupported) sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: `${p.name} — ${p.price_formatted}` } }).catch(() => {});
-        });
+
+        // Se múltiplos produtos, envia botões de seleção depois da foto
+        if (tools.products.length >= 2) {
+          await new Promise((r) => setTimeout(r, 600));
+          const selectionPrompt = `Encontrei ${tools.products.length} opções. Qual você prefere?`;
+          sendProductSelectionMessage(message.from, tools.products, selectionPrompt).catch(() => {});
+        }
       }
       if (shouldTransfer && agent.transfer_number && String(agent.transfer_number) !== String(message.from)) {
         await sendTextMessagesInSequence(agent.transfer_number, [
