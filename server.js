@@ -922,6 +922,7 @@ function extractWebhookMessages(body) {
             type: message.type,
             text: message.text?.body || null,
             buttonReply: message.interactive?.button_reply?.title || null,
+            buttonReplyId: message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || null,
             listReply: message.interactive?.list_reply?.title || null,
             profileName: contactNames.get(String(message.from || "")) || null,
             audioId: message.audio?.id || null,
@@ -1072,8 +1073,38 @@ async function handleIncomingMessageWithAssistant(message) {
       const knowledgeItems = getRelevantKnowledge(await getKnowledgeItems(agent.id), userText);
       // ── Camada de intenção + ferramentas ──────────────────────────
       const convState  = await getConvState(message.from, tenant.client_id);
-      const intent     = detectIntent(userText);
-      const tools      = await executeTools(intent, userText, tenant, leadContext, convState);
+      // ── Seleção de produto via botão/lista interativa ─────────────
+      const isProductSelection = message.buttonReplyId?.startsWith("product_") || message.listReplyId?.startsWith?.("product_");
+      if (isProductSelection) {
+        const selectedId = parseInt((message.buttonReplyId || "").replace("product_", ""));
+        if (selectedId > 0) {
+          const productDetail = await wpToolCall(tenant, `/product-detail?id=${selectedId}`).catch(() => null);
+          if (productDetail?.found && productDetail?.product) {
+            const p = productDetail.product;
+            // Envia foto + texto do produto selecionado
+            if (p.image) {
+              const caption = `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}\n✅ Em estoque: ${p.stock_quantity || "sim"}\n🔗 ${p.url}`;
+              await sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: caption.slice(0, 1024) } }).catch(() => {});
+            }
+            // Salva produto selecionado no estado
+            await setConvState(message.from, tenant.client_id, { context: { selected_product: p } }).catch(() => {});
+            await saveConversationMessage(tenant.client_id, message.from, "user", `[selecionou: ${p.name}]`, agent.id);
+            // Responde com opções
+            const selReply = `Ótima escolha! 😊 *${p.name}* por *${p.price_formatted}*${p.on_sale ? ` (de ${p.regular_price})` : ""}.\n\nQuer que eu monte o pedido? É só me dizer a quantidade!`;
+            await sendTextMessagesInSequence(message.from, [selReply]);
+            await saveConversationMessage(tenant.client_id, message.from, "assistant", selReply, agent.id);
+            return;
+          }
+        }
+      }
+
+      const intent = detectIntent(userText);
+      // Mensagem de espera quando vai buscar produto (evita silêncio)
+      if ((intent === "product_inquiry" || intent === "purchase_intent") && !audioBase64) {
+        sendTextMessagesInSequence(message.from, ["🔍 Deixa eu verificar aqui para você..."]).catch(() => {});
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      const tools = await executeTools(intent, userText, tenant, leadContext, convState);
       addLog("assistant_tools", "Intenção detectada e ferramentas executadas.", {
         from: message.from, intent,
         productsFound: tools.products?.length || 0,
@@ -1085,7 +1116,8 @@ async function handleIncomingMessageWithAssistant(message) {
         await setConvState(message.from, tenant.client_id, { awaiting: "email_for_orders" });
       }
       // Se o cliente está aguardando verificação e a mensagem parece um e-mail
-      if (convState.awaiting === "email_for_orders" && /\S+@\S+\.\S+/.test(userText)) {
+      const awaitingEmail = convState.awaiting === "email_for_orders" || convState.awaiting === "email_for_order";
+      if (awaitingEmail && /\S+@\S+\.\S+/.test(userText)) {
         const emailMatch = userText.match(/[\w.-]+@[\w.-]+\.[a-z]{2,}/i);
         if (emailMatch) {
           const verif = await verifyCustomer(tenant, message.from, emailMatch[0]).catch(() => null);
@@ -1096,12 +1128,31 @@ async function handleIncomingMessageWithAssistant(message) {
               verified_at: new Date().toISOString().slice(0, 19).replace("T", " "),
               awaiting: null,
             });
-            const orderData = await getOrderTracking(tenant, message.from, emailMatch[0]).catch(() => null);
-            if (orderData?.found) tools.orders = orderData.orders;
-            else tools.no_orders = true;
+
+            if (convState.awaiting === "email_for_order" && convState.context?.pending_order) {
+              // Cria o pedido pendente agora que o e-mail foi verificado
+              const po = convState.context.pending_order;
+              const orderData = await createOrder(
+                tenant, message.from, emailMatch[0],
+                leadContext?.name || "",
+                [{ product_id: po.product_id, quantity: po.quantity }]
+              ).catch(() => null);
+              if (orderData?.success) {
+                tools.order_created = orderData;
+              } else {
+                tools.order_failed = true;
+              }
+            } else {
+              // Era rastreio — busca pedidos
+              const orderData = await getOrderTracking(tenant, message.from, emailMatch[0]).catch(() => null);
+              if (orderData?.found) tools.orders = orderData.orders;
+              else tools.no_orders = true;
+            }
             tools.needs_email = false;
+            tools.needs_email_for_order = false;
           } else {
             tools.needs_email = false;
+            tools.needs_email_for_order = false;
             tools.email_not_found = true;
           }
         }
@@ -1124,6 +1175,28 @@ async function handleIncomingMessageWithAssistant(message) {
       const transferKeywords = safeJsonParse(agent.transfer_keywords_json) || [];
       const shouldTransfer = transferKeywords.some((kw) => (userText || "").toLowerCase().includes(kw.toLowerCase()));
       await sendTextMessagesInSequence(message.from, chunkMessage(reply, 1000));
+
+      // ── Mídia e interatividade pós-resposta ───────────────────────
+      if (tools.products?.length === 1) {
+        // 1 produto → envia foto
+        const p = tools.products[0];
+        if (p.image) {
+          const caption = `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}\n${p.in_stock ? "✅ Em estoque" : "❌ Esgotado"}\n🔗 ${p.url}`;
+          sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: caption.slice(0, 1024) } }).catch(() => {});
+        }
+      } else if (tools.products?.length >= 2) {
+        // 2+ produtos → envia lista/botões interativos para seleção
+        const selectionPrompt = tools.products.length === 2
+          ? "Encontrei 2 opções. Qual você quer?"
+          : `Encontrei ${tools.products.length} opções de "${extractProductQuery(userText)}". Qual você quer?`;
+        // Pequena pausa para o texto chegar antes dos botões
+        await new Promise((r) => setTimeout(r, 800));
+        sendProductSelectionMessage(message.from, tools.products, selectionPrompt).catch(() => {
+          // Fallback: envia foto do primeiro produto
+          const p = tools.products[0];
+          if (p.image) sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: `${p.name} — ${p.price_formatted}` } }).catch(() => {});
+        });
+      }
       if (shouldTransfer && agent.transfer_number && String(agent.transfer_number) !== String(message.from)) {
         await sendTextMessagesInSequence(agent.transfer_number, [
           `🔔 Cliente ${message.from}${leadContext?.name ? ` (${leadContext.name})` : ""} solicitou atendimento humano.\nMensagem: "${userText}"`,
@@ -1372,34 +1445,33 @@ async function upsertAgent(data) {
   const pool = await getDbPool();
   if (!pool) throw new Error("DB unavailable");
   const { id, name, prompt, keywords, assignedDomains, transferKeywords, transferNumber, icon, description, active } = data;
+  const kJson  = keywords ? JSON.stringify(keywords) : null;
+  const adJson = assignedDomains ? JSON.stringify(assignedDomains) : null;
+  const tkJson = transferKeywords ? JSON.stringify(transferKeywords) : null;
+  const activeVal = active !== false ? 1 : 0;
+
   if (id) {
+    // Atualiza pelo ID
     await pool.execute(
       `UPDATE \`${getTableName("agents")}\`
        SET name=?, prompt=?, keywords_json=?, assigned_domains_json=?, transfer_keywords_json=?,
            transfer_number=?, icon=?, description=?, active=?
        WHERE id=?`,
-      [
-        name, prompt,
-        keywords ? JSON.stringify(keywords) : null,
-        assignedDomains ? JSON.stringify(assignedDomains) : null,
-        transferKeywords ? JSON.stringify(transferKeywords) : null,
-        transferNumber || null, icon || "🤖", description || null,
-        active !== false ? 1 : 0, id,
-      ]
+      [name, prompt, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, id]
     );
   } else {
+    // Upsert pelo nome — evita duplicatas ao sincronizar do WordPress
     await pool.execute(
       `INSERT INTO \`${getTableName("agents")}\`
-       (name, prompt, keywords_json, assigned_domains_json, transfer_keywords_json, transfer_number, icon, description, active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        name, prompt,
-        keywords ? JSON.stringify(keywords) : null,
-        assignedDomains ? JSON.stringify(assignedDomains) : null,
-        transferKeywords ? JSON.stringify(transferKeywords) : null,
-        transferNumber || null, icon || "🤖", description || null,
-        active !== false ? 1 : 0,
-      ]
+         (name, prompt, keywords_json, assigned_domains_json, transfer_keywords_json, transfer_number, icon, description, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         prompt=VALUES(prompt), keywords_json=VALUES(keywords_json),
+         assigned_domains_json=VALUES(assigned_domains_json),
+         transfer_keywords_json=VALUES(transfer_keywords_json),
+         transfer_number=VALUES(transfer_number), icon=VALUES(icon),
+         description=VALUES(description), active=VALUES(active)`,
+      [name, prompt, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal]
     );
   }
 }
@@ -1649,6 +1721,23 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}) {
     prompt += "\n[AÇÃO NECESSÁRIA] Para consultar pedidos e rastreio, peça o e-mail cadastrado do cliente para verificar a identidade antes de mostrar qualquer dado de pedido.\n";
   }
 
+  if (tools.needs_email_for_order && tools.purchase_product) {
+    const p = tools.purchase_product;
+    const qty = tools.purchase_qty || 1;
+    const total = (parseFloat(String(p.price || "0").replace(",", ".")) * qty).toFixed(2).replace(".", ",");
+    prompt += `\n[PEDIDO PRONTO — aguardando confirmação de identidade]\n`;
+    prompt += `Produto: ${p.name}\nQuantidade: ${qty}x\nPreço unitário: ${p.price_formatted}\nTotal: R$ ${total}\n`;
+    prompt += `Para criar o pedido, peça o e-mail cadastrado do cliente para confirmar a identidade. Mostre o resumo acima e diga que assim que confirmar o e-mail o link de pagamento será gerado.\n`;
+  }
+
+  if (tools.order_failed) {
+    prompt += "\n[AVISO] Não foi possível criar o pedido automaticamente. Oriente o cliente a acessar o site para finalizar a compra ou ofereça transferir para atendimento humano.\n";
+  }
+
+  if (tools.email_not_found) {
+    prompt += "\n[VERIFICAÇÃO FALHOU] O e-mail informado não confere com o cadastro. Peça para verificar o e-mail ou ofereça criar um novo cadastro.\n";
+  }
+
   if (tools.order_created) {
     prompt += `\n[PEDIDO CRIADO] Pedido #${tools.order_created.order_number} criado com sucesso!\nTotal: ${tools.order_created.total}\nItens: ${(tools.order_created.items || []).join(", ")}\n💳 Link de pagamento: ${tools.order_created.payment_url}\nDiga ao cliente que o pedido foi criado e envie o link para ele pagar.\n`;
   }
@@ -1794,19 +1883,51 @@ async function clearConvState(phone, clientId) {
 
 // ── Detecção de intenção ────────────────────────────────────────────────
 function detectIntent(message) {
-  const m = (message || "").toLowerCase();
-  // Rastreio / pedido
-  if (/pedido|rastreio|rastreamento|entrega|chegou|cad[eê]|onde[. ]+est[aá]|status.*pedido|meu.*pedido|acompanhar|prazo.*entrega/i.test(m)) {
+  const m = (message || "").toLowerCase().trim();
+
+  // ── Padrões de rastreio/pedido ────────────────────────────────────
+  if (/pedido|rastreio|rastreamento|entrega|chegou|cad[eê]|onde\s+est[aá]|onde\s+t[aá]|status\s+d[oa]\s+pedido|meu\s+pedido|acompanhar|prazo\s+de\s+entrega|foi\s+enviado|saiu\s+pra\s+entrega|enviaram|postaram|correio/i.test(m)) {
     return "order_inquiry";
   }
-  // Intenção de compra clara
-  if (/quero\s+(comprar|pedir|encomendar)|quero\s+\d|adicionar|finalizar.*compra|checkout|pagar|uni(dade|des)|monte.*pedido|faz.*pedido|coloca.*pedido/i.test(m)) {
+
+  // ── Intenção de compra ────────────────────────────────────────────
+  if (/quero\s+(comprar|pedir|encomendar|\d+\s*(unidade|un\b|kit|peça))|finalizar\s*(compra|pedido)|checkout|quero\s+pagar|vou\s+(levar|comprar|pegar)|coloca\s+n[oa]\s+pedido|monte\s+um\s+pedido|faz\s+um\s+pedido|adicionar\s+ao\s+carrinho|\d+\s+unidade/i.test(m)) {
     return "purchase_intent";
   }
-  // Consulta de produto
-  if (/pre[çc]o|quanto\s+custa|valor|tem\s+.{1,30}(disponível|disponivel|em\s+estoque)|estoque|produto|perfume|kit|quanto\s+é|quanto\s+ta|quanto\s+tá|ml\b|envia|link\s+(do|da)|me\s+manda\s+o\s+link/i.test(m)) {
+
+  // ── Consulta de produto — palavras de preço/valor ────────────────
+  if (/pre[çc][o0]|pr[e3][çc][o0]|qto\s+cust|quanto\s*cust\w*|cust\w+\s+quanto|cust[ao]\b|valor|v[a4]lor|vlr\b|quanto\s+[ée]\b|quanto\s+t[áa]\b|t[áa]\s+(custando|saindo|valendo)|qto\s+[ée]\b|quanto\s+fica|fica\s+quanto|sai\s+por\s+quanto/i.test(m)) {
     return "product_inquiry";
   }
+
+  // ── Consulta de produto — disponibilidade ───────────────────────
+  if (/dispon[ií]vel|em\s+estoque|tem\s+estoque|t[eê]m?\s+.{1,50}\?|voc[eê]s?\s+t[eê]m?\b|vcs\s+tem\b|voc[eê]\s+tem\b|tem\s+(esse|essa|este|esta|o\s+|a\s+)\b|tem\s+\w+\s*(disponível|\?)|\btem\b.*\?/i.test(m)) {
+    return "product_inquiry";
+  }
+
+  // ── Consulta de produto — categorias e formatos ──────────────────
+  if (/perfume|parfum|fragrân|fragranc|colônia|colonia|eau\s+de\s+(parfum|toilette|cologne)|edp\b|edt\b|edc\b|aromatizante|\d+\s*ml\b|ml\b|oz\b|kit\s+|miniatura|decant|body\s+splash|hidratante|creme\s+corporal|desodorante|sabonete/i.test(m)) {
+    return "product_inquiry";
+  }
+
+  // ── Consulta de produto — outras formas de pedir ────────────────
+  if (/me\s+manda\s+(o\s+)?link|manda\s+(a\s+)?foto|mostra\s+(o\s+|a\s+)?produto|link\s+d[oa]\s+produto|me\s+passa\s+o\s+link|qual\s+o\s+link|link\s+do\s+(produto|perfume|kit)|manda\s+(o\s+)?link|envia\s+o\s+link|foto\s+d[oa]|imagem\s+d[oa]/i.test(m)) {
+    return "product_inquiry";
+  }
+
+  // ── Detecta nomes de produtos isolados (mensagens curtas sem saudação) ──
+  // Ex: "la vie est belle", "asad elixir", "good girl 80ml", "sabah?"
+  const stripped = m.replace(/[?!.,;:]/g, "").trim();
+  const words = stripped.split(/\s+/).filter(Boolean);
+  const isSmallTalk = /^(oi\b|ol[áa]\b|hey\b|eae\b|e\s+a[íi]\b|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+(bem|bom|certo|ok)|td\s+bem|valeu|obrigad\w*|obg\b|vlw\b|ok\b|certo\b|sim\b|n[aã]o\b|perfeito\b|ótimo\b|otimo\b|show\b|beleza\b|at[eé]\s+mais|tchau\b|flw\b|abs\b|bjss?\b|pode\s+(ser|sim)\b|claro\b|com\s+certeza|entend\w+|compreend\w+)/i.test(stripped);
+  const isOpenQuestion = /^(pode\s+me\s+ajudar|consegue\s+me\s+ajudar|preciso\s+de\s+ajuda|como\s+funciona|como\s+compro|onde\s+compro|como\s+faço|qual\s+[ée]\s+o\s+site|vocês\s+(vendem|trabalham|fazem|são)|o\s+que\s+(vocês?\s+vendem|é\s+a\s+loja)|faz\s+entrega)/i.test(stripped);
+
+  if (!isSmallTalk && !isOpenQuestion && words.length >= 1 && words.length <= 8) {
+    // Se tem ao menos uma palavra com 3+ chars que não seja artigo/preposição
+    const hasSubstantive = words.some(w => w.length >= 3 && !/^(de|do|da|dos|das|em|no|na|por|com|sem|que|uma|uns|umas|pra|pro|pros|pras|ate|atè)$/.test(w));
+    if (hasSubstantive) return "product_inquiry";
+  }
+
   return "conversational";
 }
 
@@ -1830,7 +1951,39 @@ async function wpToolCall(tenant, path, method = "GET", body = null) {
 
 async function searchProducts(tenant, query) {
   if (!query || query.length < 2) return null;
-  return wpToolCall(tenant, `/product-search?q=${encodeURIComponent(query)}&limit=5`);
+
+  // Normaliza acentos para melhorar match com WooCommerce
+  const normalize = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+
+  // Tentativa 1: query completa
+  let data = await wpToolCall(tenant, `/product-search?q=${encodeURIComponent(query)}&limit=5`);
+  if (data?.products?.length) return data;
+
+  // Tentativa 2: query normalizada sem acentos
+  const normQ = normalize(query);
+  if (normQ !== query.toLowerCase()) {
+    data = await wpToolCall(tenant, `/product-search?q=${encodeURIComponent(normQ)}&limit=5`);
+    if (data?.products?.length) return data;
+  }
+
+  // Tentativa 3: palavras com 4+ chars separadas (typo tolerance)
+  const words = query.split(/\s+/).filter((w) => w.length >= 4);
+  if (words.length > 1) {
+    // Tenta com as 2 palavras mais longas (provavelmente nome da marca/produto)
+    const top2 = words.sort((a, b) => b.length - a.length).slice(0, 2).join(" ");
+    data = await wpToolCall(tenant, `/product-search?q=${encodeURIComponent(top2)}&limit=5`);
+    if (data?.products?.length) return data;
+  }
+
+  // Tentativa 4: só a palavra mais longa (última chance — handle de typos pesados)
+  if (words.length > 0) {
+    const longest = words.reduce((a, b) => (a.length > b.length ? a : b));
+    if (longest.length >= 4) {
+      data = await wpToolCall(tenant, `/product-search?q=${encodeURIComponent(longest)}&limit=5`);
+    }
+  }
+
+  return data;
 }
 
 async function getOrderTracking(tenant, phone, email) {
@@ -1853,23 +2006,30 @@ async function createOrder(tenant, phone, email, name, items) {
 function extractProductQuery(message) {
   const m = (message || "").toLowerCase();
   const cleaned = m
-    // Remove intenção
-    .replace(/\b(pre[çc]o|quanto\s+custa|quanto\s+[ée]|quanto\s+t[áa]|custa|valor|tem\s+disponível|tem\s+disponivel|quero|me\s+manda|link|enviar?|informa[çc][aã]o|qual|quais|como|sobre|falar\s+sobre|ver|me\s+mostra|me\s+diz|me\s+fala|me\s+passa|me\s+d[áa])\b/gi, "")
-    // Remove saudações
+    .replace(/\b(pre[çc]o|preco|quanto|cust\w*|valor|quero|me\s+manda|link|enviar?|informa\w*|qual|quais|como|sobre|ver|mostra\w*|diz\w*|fala\w*|passa\w*|sabe\w*|consegue\w*|pode\w*|existe\w*|manda\w*|voc[eê]\s+tem|tem\s+esse|tem\s+essa|t[áa]\b)\b/gi, "")
     .replace(/\b(oi|ol[áa]|boa\s+tarde|boa\s+noite|bom\s+dia|tudo\s+bem|pfv|pf|por\s+favor|obrigad[oa])\b/gi, "")
-    // Remove artigos e preposições
-    .replace(/\b(o|a|os|as|um|uma|uns|umas|do|da|de|dos|das|em|no|na|nos|nas|por|para|com|sem|que|[ée]|eu|voc[eê]|me|meu|minha|seu|sua)\b/gi, "")
-    // Remove pontuação e espaços extras
-    .replace(/[?!.,;:]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\b(o|a|os|as|um|uma|do|da|de|dos|das|em|no|na|nos|nas|por|para|com|sem|que|eu|voce|me|meu|minha|seu|sua|esse|esta|este|essa)\b/gi, "")
+    .replace(/[?!.,;:]/g, "").replace(/\s+/g, " ").trim();
   return cleaned.slice(0, 60);
+}
+
+// ── Extrai quantidade da mensagem ─────────────────────────────────────
+function extractQuantity(message) {
+  const m = message || "";
+  // "2 unidades", "3 kits", "quero 4", "2x", "duas", "três"
+  const numMap = { uma: 1, dois: 2, duas: 2, três: 3, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10 };
+  const numWord = m.toLowerCase().match(/\b(uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez)\b/i);
+  if (numWord) return numMap[numWord[1].toLowerCase()] || 1;
+  const numMatch = m.match(/\b(\d+)\s*(x\b|unidade|peça|kit|item|exemplar|par)s?/i) || m.match(/\b(\d+)\b/);
+  const qty = numMatch ? parseInt(numMatch[1]) : 1;
+  return Math.min(Math.max(qty, 1), 99);
 }
 
 // ── Executa ferramentas baseado na intenção ────────────────────────────
 async function executeTools(intent, message, tenant, leadContext, convState) {
   const results = { intent };
 
+  // ── Consulta de produto ──────────────────────────────────────────
   if (intent === "product_inquiry" || intent === "purchase_intent") {
     const query = extractProductQuery(message);
     if (query.length >= 2) {
@@ -1878,24 +2038,119 @@ async function executeTools(intent, message, tenant, leadContext, convState) {
     }
   }
 
-  if (intent === "order_inquiry") {
-    // Verifica se o cliente já confirmou identidade
-    if (convState.verified_email || leadContext?.email) {
-      const email = convState.verified_email || leadContext?.email;
-      const phone = leadContext?.phone || null;
-      const data = await getOrderTracking(tenant, phone, email);
-      if (data?.found) {
-        results.orders = data.orders;
+  // ── Intenção de compra ───────────────────────────────────────────
+  if (intent === "purchase_intent" && results.products?.length > 0) {
+    const qty     = extractQuantity(message);
+    const product = results.products[0];
+    const email   = convState.verified_email || leadContext?.email;
+    const phone   = leadContext?.phone || tenant?.client_id || "";
+    const name    = leadContext?.name || "";
+
+    results.purchase_qty      = qty;
+    results.purchase_product  = product;
+
+    if (email) {
+      // Email disponível → cria pedido direto
+      const orderData = await createOrder(tenant, phone, email, name, [
+        { product_id: product.id, quantity: qty },
+      ]).catch(() => null);
+
+      if (orderData?.success) {
+        results.order_created = orderData;
       } else {
-        results.no_orders = true;
+        // Falhou — mostra produto e pede confirmação manual
+        results.order_failed = true;
       }
     } else {
-      // Precisa verificar identidade primeiro
+      // Sem email → precisa verificar identidade antes de criar pedido
+      results.needs_email_for_order = true;
+      // Salva intenção no estado da conversa
+      await setConvState(phone || message, tenant.client_id, {
+        awaiting: "email_for_order",
+        context: {
+          pending_order: {
+            product_id:   product.id,
+            product_name: product.name,
+            price:        product.price_formatted,
+            quantity:     qty,
+          },
+        },
+      }).catch(() => {});
+    }
+  }
+
+  // ── Rastreio/pedido ──────────────────────────────────────────────
+  if (intent === "order_inquiry") {
+    const email = convState.verified_email || leadContext?.email;
+    const phone = leadContext?.phone || null;
+    if (email || phone) {
+      const data = await getOrderTracking(tenant, phone, email);
+      if (data?.found) results.orders = data.orders;
+      else results.no_orders = true;
+    } else {
       results.needs_email = true;
     }
   }
 
   return results;
+}
+
+// ── Mensagens interativas: lista de produtos para seleção ─────────────
+function truncate(str, max) {
+  return String(str || "").slice(0, max);
+}
+
+async function sendProductSelectionMessage(phone, products, prompt = "Encontrei estas opções. Selecione a que deseja:") {
+  const validProducts = products.slice(0, 10);
+
+  if (validProducts.length <= 3) {
+    // Botões (até 3)
+    return sendWhatsAppRequest({
+      messaging_product: "whatsapp",
+      to: phone,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: truncate(prompt, 1024) },
+        action: {
+          buttons: validProducts.map((p) => ({
+            type: "reply",
+            reply: {
+              id: `product_${p.id}`,
+              title: truncate(p.name, 20),
+            },
+          })),
+        },
+      },
+    });
+  }
+
+  // Lista (4-10 itens)
+  return sendWhatsAppRequest({
+    messaging_product: "whatsapp",
+    to: phone,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: { type: "text", text: "Produtos encontrados" },
+      body: { text: truncate(prompt, 1024) },
+      footer: { text: "Toque para selecionar" },
+      action: {
+        button: "Ver opções",
+        sections: [{
+          title: "Disponíveis",
+          rows: validProducts.map((p) => ({
+            id: `product_${p.id}`,
+            title: truncate(p.name, 24),
+            description: truncate(
+              `${p.price_formatted}${p.on_sale && p.discount_percent ? " (" + p.discount_percent + " off)" : ""}${p.in_stock ? " ✅ estoque" : " ❌ esgotado"}`,
+              72
+            ),
+          })),
+        }],
+      },
+    },
+  });
 }
 
 // ── Campanha: Sync de leads do WordPress ──────────────────────────────
