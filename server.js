@@ -1180,11 +1180,13 @@ async function handleIncomingMessageWithAssistant(message) {
 
       // ── Mídia e interatividade pós-resposta ───────────────────────
       if (tools.products?.length === 1) {
-        // 1 produto → envia foto
+        // 1 produto → envia foto (só formatos suportados pelo WhatsApp)
         const p = tools.products[0];
-        if (p.image) {
+        const imgUrl = p.image;
+        const isSupported = imgUrl && /\.(jpe?g|jpg|png|webp)(\?.*)?$/i.test(imgUrl);
+        if (isSupported) {
           const caption = `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}\n${p.in_stock ? "✅ Em estoque" : "❌ Esgotado"}\n🔗 ${p.url}`;
-          sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: caption.slice(0, 1024) } }).catch(() => {});
+          sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: imgUrl, caption: caption.slice(0, 1024) } }).catch(() => {});
         }
       } else if (tools.products?.length >= 2) {
         // 2+ produtos → envia lista/botões interativos para seleção
@@ -1194,9 +1196,10 @@ async function handleIncomingMessageWithAssistant(message) {
         // Pequena pausa para o texto chegar antes dos botões
         await new Promise((r) => setTimeout(r, 800));
         sendProductSelectionMessage(message.from, tools.products, selectionPrompt).catch(() => {
-          // Fallback: envia foto do primeiro produto
+          // Fallback: envia foto do primeiro produto (apenas formatos suportados)
           const p = tools.products[0];
-          if (p.image) sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: `${p.name} — ${p.price_formatted}` } }).catch(() => {});
+          const isSupported = p.image && /\.(jpe?g|jpg|png|webp)(\?.*)?$/i.test(p.image);
+          if (isSupported) sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: `${p.name} — ${p.price_formatted}` } }).catch(() => {});
         });
       }
       if (shouldTransfer && agent.transfer_number && String(agent.transfer_number) !== String(message.from)) {
@@ -1745,6 +1748,24 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}) {
   }
 
   // ── Instrução de contexto de conversa ──
+  if (tools.cart?.length) {
+    prompt += "\n[CARRINHO ATUAL — pedidos pendentes do cliente]\n";
+    tools.cart.forEach((o) => {
+      prompt += `• Pedido #${o.number} — ${o.total} (${o.created})\n`;
+      (o.items || []).forEach((i) => { prompt += `  - ${i.name} x${i.qty} → ${i.subtotal}\n`; });
+      prompt += `  💳 Link para pagar: ${o.payment_url}\n`;
+    });
+  }
+  if (tools.cart_empty) {
+    prompt += "\n[CARRINHO] Nenhum pedido pendente. O carrinho está vazio.\n";
+  }
+  if (tools.cart_cleared) {
+    prompt += `\n[CARRINHO LIMPO] ${tools.cart_cleared.message} Informe ao cliente que o carrinho foi esvaziado.\n`;
+  }
+  if (tools.cart_clear_failed) {
+    prompt += "\n[AVISO] Não foi possível limpar o carrinho. Peça ao cliente para tentar de novo.\n";
+  }
+
   prompt += "\n[INSTRUÇÃO DE CONTEXTO]\nO histórico das últimas mensagens trocadas com este cliente aparece abaixo (do mais antigo ao mais recente). Leia tudo antes de responder para manter coerência e não repetir informações já ditas.\n";
 
   return prompt;
@@ -1890,6 +1911,12 @@ function detectIntent(message) {
   // ── Padrões de rastreio/pedido ────────────────────────────────────
   if (/pedido|rastreio|rastreamento|entrega|chegou|cad[eê]|onde\s+est[aá]|onde\s+t[aá]|status\s+d[oa]\s+pedido|meu\s+pedido|acompanhar|prazo\s+de\s+entrega|foi\s+enviado|saiu\s+pra\s+entrega|enviaram|postaram|correio/i.test(m)) {
     return "order_inquiry";
+  }
+
+  // ── Carrinho ─────────────────────────────────────────────────────
+  if (/carrinho|limpar\s+(o\s+)?carrinho|esvaziar|cancela\s+(o\s+)?(pedido|carrinho)|remover\s+d[oa]\s+carrinho|o\s+que\s+(tem|t[áa])\s+n[oa]\s+(meu\s+)?carrinho|meus?\s+pedidos?\s+pendente|ver\s+(o\s+)?carrinho|o\s+que\s+eu\s+(coloquei|adicionei)|pedido\s+pendente/i.test(m)) {
+    if (/limpar|esvaziar|cancela|remover|apagar|deletar|n[aã]o\s+quero\s+mais/i.test(m)) return "cart_clear";
+    return "cart_inquiry";
   }
 
   // ── Intenção de compra ────────────────────────────────────────────
@@ -2044,30 +2071,23 @@ async function executeTools(intent, message, tenant, leadContext, convState) {
   if (intent === "purchase_intent" && results.products?.length > 0) {
     const qty     = extractQuantity(message);
     const product = results.products[0];
-    const email   = convState.verified_email || leadContext?.email;
-    const phone   = leadContext?.phone || tenant?.client_id || "";
+    const phone   = leadContext?.phone || "";
     const name    = leadContext?.name || "";
 
-    results.purchase_qty      = qty;
-    results.purchase_product  = product;
+    results.purchase_qty     = qty;
+    results.purchase_product = product;
 
-    if (email) {
-      // Email disponível → cria pedido direto
-      const orderData = await createOrder(tenant, phone, email, name, [
+    // Email SEMPRE obrigatório — usa apenas o verificado nesta sessão
+    if (convState.verified_email) {
+      const orderData = await createOrder(tenant, phone, convState.verified_email, name, [
         { product_id: product.id, quantity: qty },
       ]).catch(() => null);
-
-      if (orderData?.success) {
-        results.order_created = orderData;
-      } else {
-        // Falhou — mostra produto e pede confirmação manual
-        results.order_failed = true;
-      }
+      if (orderData?.success) results.order_created = orderData;
+      else results.order_failed = true;
     } else {
-      // Sem email → precisa verificar identidade antes de criar pedido
+      // Pede confirmação de email (mesmo que já tenhamos o email do lead)
       results.needs_email_for_order = true;
-      // Salva intenção no estado da conversa
-      await setConvState(phone || message, tenant.client_id, {
+      await setConvState(phone, tenant.client_id, {
         awaiting: "email_for_order",
         context: {
           pending_order: {
@@ -2078,6 +2098,34 @@ async function executeTools(intent, message, tenant, leadContext, convState) {
           },
         },
       }).catch(() => {});
+    }
+  }
+
+  // ── Carrinho: ver pedidos pendentes ──────────────────────────────
+  if (intent === "cart_inquiry") {
+    const email = convState.verified_email || leadContext?.email;
+    const phone = leadContext?.phone || null;
+    if (email || phone) {
+      const data = await wpToolCall(tenant, `/cart-status?email=${encodeURIComponent(email||"")}&phone=${encodeURIComponent(phone||"")}`);
+      if (data?.found) results.cart = data.pending_orders;
+      else results.cart_empty = true;
+    } else {
+      results.needs_email = true;
+    }
+  }
+
+  // ── Carrinho: limpar pedidos pendentes ───────────────────────────
+  if (intent === "cart_clear") {
+    const email = convState.verified_email || leadContext?.email;
+    const phone = leadContext?.phone || null;
+    if (email || phone) {
+      const data = await wpToolCall(tenant, "/cart-clear", "POST", {
+        email: email || "", phone: phone || "",
+      });
+      if (data?.success) results.cart_cleared = data;
+      else results.cart_clear_failed = true;
+    } else {
+      results.needs_email = true;
     }
   }
 
