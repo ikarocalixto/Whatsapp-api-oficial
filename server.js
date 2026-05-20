@@ -1486,33 +1486,48 @@ function getRelevantKnowledge(items, messageText, limit = 5) {
 // ── IA: Prompt personalizado ───────────────────────────────────────────
 function buildPersonalizedPrompt(agent, lead, knowledgeItems) {
   let prompt = agent.prompt || "";
+
+  // ── Perfil do lead (dados do WordPress) ──
   if (lead && lead.found) {
-    prompt += "\n\n[PERFIL DO CLIENTE]\n";
-    if (lead.name) prompt += `Nome: ${lead.name}\n`;
+    prompt += "\n\n[PERFIL DO CLIENTE — use estas informações para personalizar TODA a conversa]\n";
+    if (lead.name)  prompt += `Nome: ${lead.name}\n`;
     if (lead.score) prompt += `Engajamento: ${lead.score}/100\n`;
     if (lead.stage) prompt += `Estágio no funil: ${lead.stage}\n`;
-    if (lead.utm_source) prompt += `Origem: ${lead.utm_source}${lead.utm_campaign ? ` / ${lead.utm_campaign}` : ""}\n`;
-    if (lead.qualification?.profile) prompt += `Perfil: ${lead.qualification.profile}\n`;
+    if (lead.utm_source) prompt += `Como chegou: ${lead.utm_source}${lead.utm_campaign ? ` / ${lead.utm_campaign}` : ""}\n`;
+    if (lead.qualification?.profile) prompt += `Perfil: ${lead.qualification.profile}${lead.qualification.has_store ? " (tem loja)" : ""}\n`;
+
+    prompt += "\n[HISTÓRICO DE COMPRAS]\n";
     if (Number(lead.total_orders) > 0) {
-      prompt += `Compras: ${lead.total_orders} pedido(s)`;
-      if (lead.total_spent) prompt += ` | Total: R$${lead.total_spent}`;
+      prompt += `Total de pedidos: ${lead.total_orders}`;
+      if (lead.total_spent) prompt += ` | Valor total: R$${lead.total_spent}`;
       prompt += "\n";
-      if (lead.last_order_product) prompt += `Último produto: ${lead.last_order_product}\n`;
-      if (lead.days_since_last_purchase != null) prompt += `Dias desde última compra: ${lead.days_since_last_purchase}\n`;
+      if (lead.last_order_product) prompt += `Último produto comprado: ${lead.last_order_product}\n`;
+      if (lead.last_order_date)    prompt += `Data da última compra: ${lead.last_order_date}\n`;
+      if (lead.days_since_last_purchase != null) prompt += `Dias desde a última compra: ${lead.days_since_last_purchase} dias\n`;
     } else {
-      prompt += "Ainda não realizou nenhuma compra.\n";
+      prompt += "Este cliente ainda NÃO realizou nenhuma compra. Seu objetivo é ajudá-lo a fazer a primeira compra.\n";
     }
-    if (lead.cart_abandoned) prompt += "Tem carrinho abandonado (não finalizou a compra).\n";
+
+    prompt += "\n[COMPORTAMENTO RECENTE]\n";
+    if (lead.cart_abandoned) prompt += "⚠️ Tem carrinho abandonado — visitou o checkout mas não finalizou a compra.\n";
     if (Array.isArray(lead.visited_pages) && lead.visited_pages.length) {
-      prompt += `Páginas visitadas recentemente: ${lead.visited_pages.slice(0, 5).join(", ")}\n`;
+      prompt += `Produtos/páginas visitados recentemente: ${lead.visited_pages.slice(0, 5).join(", ")}\n`;
     }
+  } else {
+    prompt += "\n\n[CLIENTE]\nCliente ainda não identificado no sistema. Tente entender o que ele busca.\n";
   }
+
+  // ── Base de conhecimento ──
   if (knowledgeItems.length > 0) {
-    prompt += "\n[BASE DE CONHECIMENTO]\n";
+    prompt += "\n[BASE DE CONHECIMENTO — use como referência para responder com precisão]\n";
     for (const item of knowledgeItems) {
       prompt += `### ${item.title}\n${item.content}\n\n`;
     }
   }
+
+  // ── Instrução de contexto de conversa ──
+  prompt += "\n[INSTRUÇÃO DE CONTEXTO]\nO histórico das últimas mensagens trocadas com este cliente aparece abaixo (do mais antigo ao mais recente). Leia tudo antes de responder para manter coerência e não repetir informações já ditas.\n";
+
   return prompt;
 }
 
@@ -2383,6 +2398,66 @@ router.get("/api/campaigns/:id/results", async (req, res) => {
       },
     });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Diagnóstico: tudo sobre um número de telefone ─────────────────────
+router.get("/api/debug/phone/:phone", async (req, res) => {
+  const phone = String(req.params.phone).replace(/\D/g, "");
+  const result = { phone, checkedAt: new Date().toISOString() };
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      // 1. Mapeamento phone → tenant
+      const [mapped] = await pool.execute(
+        `SELECT * FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
+      );
+      result.phoneTenantMap = mapped;
+
+      // 2. Lead no cache local
+      const phoneSuffix = phone.slice(-9);
+      const [cached] = await pool.execute(
+        `SELECT client_id, phone, name, email, score, stage, total_orders, last_order_date, cart_abandoned, last_synced_at
+         FROM \`${getTableName("leads_cache")}\` WHERE phone LIKE ?`,
+        [`%${phoneSuffix}`]
+      );
+      result.leadsCache = cached;
+
+      // 3. Últimas conversas
+      const [convs] = await pool.execute(
+        `SELECT role, LEFT(message,120) AS message_preview, agent_id, created_at
+         FROM \`${getTableName("conversations")}\` WHERE phone = ?
+         ORDER BY created_at DESC LIMIT 10`,
+        [phone]
+      );
+      result.recentConversations = convs;
+      result.conversationCount = convs.length;
+    }
+
+    // 4. Resolver tenant em tempo real
+    const tenant = await resolveTenantForPhone(phone).catch((e) => ({ error: e.message }));
+    result.resolvedTenant = tenant
+      ? { client_id: tenant.client_id, wp_url: tenant.wp_url, active: tenant.active }
+      : null;
+
+    // 5. Se encontrou tenant, puxa contexto do lead no WordPress
+    if (tenant && tenant.wp_url) {
+      const ctx = await fetchLeadContextFromWP(tenant, phone).catch((e) => ({ error: e.message }));
+      result.leadContextFromWP = ctx;
+    }
+
+    // 6. Agentes disponíveis para o tenant
+    if (tenant) {
+      const allAgents = await getAgents();
+      const agent = resolveAgentForTenant(tenant.client_id, allAgents, "");
+      result.resolvedAgent = agent
+        ? { id: agent.id, name: agent.name, assignedDomains: safeJsonParse(agent.assigned_domains_json) }
+        : null;
+    }
+
+    res.json({ success: true, ...result });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, ...result });
+  }
 });
 
 // =====================================================================
