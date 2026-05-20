@@ -1154,7 +1154,7 @@ async function handleIncomingMessageWithAssistant(message) {
               context: { pending_order: { product_id: product.id, product_name: product.name, price: product.price_formatted, quantity: qty } },
             }).catch(() => {});
             const total = (parseFloat(String(product.price || "0").replace(",", ".")) * qty).toFixed(2).replace(".", ",");
-            const askEmail = `📋 *Resumo do pedido:*\n• ${product.name} x${qty}\n• Total: R$ ${total}\n\nPara criar o pedido, me informe o *e-mail cadastrado* na Ladygriffe:`;
+            const askEmail = `📋 *RESUMO DO PEDIDO*\n• ${product.name} x${qty}\n• Total: *R$ ${total}*\n\n✉️ *INFORME SEU E-MAIL CADASTRADO* para confirmar e gerar o link de pagamento:`;
             await sendTextMessagesInSequence(message.from, [askEmail]);
             await saveConversationMessage(tenant.client_id, message.from, "assistant", askEmail, agent.id);
             return;
@@ -1236,28 +1236,68 @@ async function handleIncomingMessageWithAssistant(message) {
 
       // ── Mídia e interatividade pós-resposta ───────────────────────
       if (tools.products?.length >= 1) {
-        const p = tools.products[0];
-        const imgUrl = p.image;
-        const isSupported = imgUrl && /\.(jpe?g|jpg|png|webp)(\?.*)?$/i.test(imgUrl);
+        const prods = tools.products;
+        const isSupportedImg = (url) => url && /\.(jpe?g|jpg|png|webp)(\?.*)?$/i.test(url);
 
-        // Sempre envia a foto do primeiro produto encontrado
-        if (isSupported) {
-          const caption = tools.products.length === 1
-            ? `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}`
-            : `${p.name}\n💰 ${p.price_formatted}${p.on_sale ? ` (${p.discount_percent} off)` : ""}\n+ ${tools.products.length - 1} outra(s) opção(ões) abaixo 👇`;
-          await sendWhatsAppRequest({
-            messaging_product: "whatsapp",
-            to: message.from,
-            type: "image",
-            image: { link: imgUrl, caption: caption.slice(0, 1024) },
-          }).catch((e) => addLog("image_error", "Falha ao enviar foto.", { url: imgUrl, error: e.response?.data || e.message }));
-        }
+        if (prods.length === 1) {
+          // ── 1 produto: foto + texto já enviado ──────────────────────
+          const p = prods[0];
+          if (isSupportedImg(p.image)) {
+            const caption = `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}`;
+            await sendWhatsAppRequest({
+              messaging_product: "whatsapp", to: message.from, type: "image",
+              image: { link: p.image, caption: caption.slice(0, 1024) },
+            }).catch((e) => addLog("image_error", "Falha ao enviar foto.", { url: p.image, error: e.response?.data || e.message }));
+          }
 
-        // Se múltiplos produtos, envia botões de seleção depois da foto
-        if (tools.products.length >= 2) {
-          await new Promise((r) => setTimeout(r, 600));
-          const selectionPrompt = `Encontrei ${tools.products.length} opções. Qual você prefere?`;
-          sendProductSelectionMessage(message.from, tools.products, selectionPrompt).catch(() => {});
+        } else if (prods.length <= 3) {
+          // ── 2-3 produtos: botão interativo COM foto no header (1 imagem + botões) ──
+          const firstImg = prods.find(p => isSupportedImg(p.image));
+          const buttons  = prods.slice(0, 3).map(p => ({
+            type: "reply",
+            reply: { id: `product_${p.id}`, title: truncate(p.name, 20) },
+          }));
+          const bodyText = prods.map(p =>
+            `• ${p.name}\n  💰 ${p.price_formatted}${p.on_sale ? ` (${p.discount_percent} off)` : ""}`
+          ).join("\n\n");
+
+          if (firstImg?.image) {
+            // Botão interativo com header de imagem
+            await sendWhatsAppRequest({
+              messaging_product: "whatsapp", to: message.from, type: "interactive",
+              interactive: {
+                type: "button",
+                header: { type: "image", image: { link: firstImg.image } },
+                body: { text: truncate(bodyText, 1024) },
+                action: { buttons },
+              },
+            }).catch(async () => {
+              // Fallback: envia fotos individuais + botões separados
+              for (const p of prods) {
+                if (isSupportedImg(p.image)) {
+                  await sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image",
+                    image: { link: p.image, caption: `${p.name} — ${p.price_formatted}` } }).catch(() => {});
+                  await new Promise(r => setTimeout(r, 400));
+                }
+              }
+              sendProductSelectionMessage(message.from, prods, "Qual você prefere? 👆").catch(() => {});
+            });
+          } else {
+            sendProductSelectionMessage(message.from, prods, "Qual você prefere? 👆").catch(() => {});
+          }
+
+        } else {
+          // ── 4+ produtos: galeria de fotos (até 5) + lista de seleção ──
+          const withImg = prods.filter(p => isSupportedImg(p.image)).slice(0, 5);
+          for (const p of withImg) {
+            await sendWhatsAppRequest({
+              messaging_product: "whatsapp", to: message.from, type: "image",
+              image: { link: p.image, caption: `${truncate(p.name, 60)}\n💰 ${p.price_formatted}${p.on_sale ? ` (${p.discount_percent} off)` : ""}` },
+            }).catch(() => {});
+            await new Promise(r => setTimeout(r, 350));
+          }
+          await new Promise(r => setTimeout(r, 400));
+          sendProductSelectionMessage(message.from, prods, `Encontrei ${prods.length} opções. Qual você prefere? 👆`).catch(() => {});
         }
       }
       if (shouldTransfer && agent.transfer_number && String(agent.transfer_number) !== String(message.from)) {
@@ -1793,9 +1833,8 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}) {
     const p = tools.purchase_product;
     const qty = tools.purchase_qty || 1;
     const total = (parseFloat(String(p.price || "0").replace(",", ".")) * qty).toFixed(2).replace(".", ",");
-    prompt += `\n[PEDIDO PRONTO — aguardando confirmação de identidade]\n`;
-    prompt += `Produto: ${p.name}\nQuantidade: ${qty}x\nPreço unitário: ${p.price_formatted}\nTotal: R$ ${total}\n`;
-    prompt += `Para criar o pedido, peça o e-mail cadastrado do cliente para confirmar a identidade. Mostre o resumo acima e diga que assim que confirmar o e-mail o link de pagamento será gerado.\n`;
+    prompt += `\n[PEDIDO AGUARDANDO E-MAIL]\nProduto: ${p.name} x${qty} — Total: R$ ${total}\n`;
+    prompt += `Diga exatamente isso:\n"📋 *RESUMO DO SEU PEDIDO*\n• ${p.name} x${qty}\n• Total: *R$ ${total}*\n\n✉️ *INFORME SEU E-MAIL CADASTRADO* para confirmar e receber o link de pagamento:"\nNão adicione mais texto. Aguarde o e-mail.\n`;
   }
 
   if (tools.order_failed) {
