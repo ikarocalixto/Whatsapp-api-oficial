@@ -1074,6 +1074,12 @@ async function handleIncomingMessageWithAssistant(message) {
       const convState  = await getConvState(message.from, tenant.client_id);
       const intent     = detectIntent(userText);
       const tools      = await executeTools(intent, userText, tenant, leadContext, convState);
+      addLog("assistant_tools", "Intenção detectada e ferramentas executadas.", {
+        from: message.from, intent,
+        productsFound: tools.products?.length || 0,
+        ordersFound: tools.orders?.length || 0,
+        needsEmail: tools.needs_email || false,
+      });
       // Salva estado se precisar de e-mail (aguardando verificação)
       if (tools.needs_email && convState.awaiting !== "email_for_orders") {
         await setConvState(message.from, tenant.client_id, { awaiting: "email_for_orders" });
@@ -1845,9 +1851,19 @@ async function createOrder(tenant, phone, email, name, items) {
 
 // ── Extrai possíveis nomes de produtos da mensagem (heurística simples) ──
 function extractProductQuery(message) {
-  const m = message || "";
-  // Remove palavras comuns de intenção e retorna o restante como query
-  return m.replace(/\b(preço|preco|quanto|custa|valor|tem|disponível|disponivel|quero|me\s+manda|link\s+(do|da)|enviar?|informa[çc][aã]o)\b/gi, "").replace(/[?!.,;]/g, "").trim().slice(0, 80);
+  const m = (message || "").toLowerCase();
+  const cleaned = m
+    // Remove intenção
+    .replace(/\b(pre[çc]o|quanto\s+custa|quanto\s+[ée]|quanto\s+t[áa]|custa|valor|tem\s+disponível|tem\s+disponivel|quero|me\s+manda|link|enviar?|informa[çc][aã]o|qual|quais|como|sobre|falar\s+sobre|ver|me\s+mostra|me\s+diz|me\s+fala|me\s+passa|me\s+d[áa])\b/gi, "")
+    // Remove saudações
+    .replace(/\b(oi|ol[áa]|boa\s+tarde|boa\s+noite|bom\s+dia|tudo\s+bem|pfv|pf|por\s+favor|obrigad[oa])\b/gi, "")
+    // Remove artigos e preposições
+    .replace(/\b(o|a|os|as|um|uma|uns|umas|do|da|de|dos|das|em|no|na|nos|nas|por|para|com|sem|que|[ée]|eu|voc[eê]|me|meu|minha|seu|sua)\b/gi, "")
+    // Remove pontuação e espaços extras
+    .replace(/[?!.,;:]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.slice(0, 60);
 }
 
 // ── Executa ferramentas baseado na intenção ────────────────────────────
