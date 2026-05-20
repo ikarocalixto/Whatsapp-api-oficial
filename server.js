@@ -1089,18 +1089,74 @@ async function handleIncomingMessageWithAssistant(message) {
           const productDetail = await wpToolCall(tenant, `/product-detail?id=${selectedId}`).catch(() => null);
           if (productDetail?.found && productDetail?.product) {
             const p = productDetail.product;
-            // Envia foto + texto do produto selecionado
-            if (p.image) {
-              const caption = `${p.name}\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}\n✅ Em estoque: ${p.stock_quantity || "sim"}\n🔗 ${p.url}`;
+            // Salva produto selecionado no estado
+            await setConvState(message.from, tenant.client_id, {
+              awaiting: "product_qty",
+              context: { selected_product: p },
+            }).catch(() => {});
+            await saveConversationMessage(tenant.client_id, message.from, "user", `[selecionou: ${p.name}]`, agent.id);
+            // Envia foto do produto
+            const isSupported = p.image && /\.(jpe?g|jpg|png|webp)(\?.*)?$/i.test(p.image);
+            if (isSupported) {
+              const caption = `*${p.name}*\n💰 ${p.price_formatted}${p.on_sale && p.discount_percent ? ` (${p.discount_percent} off)` : ""}\n✅ ${p.stock_quantity || "em estoque"} unidades`;
               await sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "image", image: { link: p.image, caption: caption.slice(0, 1024) } }).catch(() => {});
             }
-            // Salva produto selecionado no estado
-            await setConvState(message.from, tenant.client_id, { context: { selected_product: p } }).catch(() => {});
-            await saveConversationMessage(tenant.client_id, message.from, "user", `[selecionou: ${p.name}]`, agent.id);
-            // Responde com opções
-            const selReply = `Ótima escolha! 😊 *${p.name}* por *${p.price_formatted}*${p.on_sale ? ` (de ${p.regular_price})` : ""}.\n\nQuer que eu monte o pedido? É só me dizer a quantidade!`;
-            await sendTextMessagesInSequence(message.from, [selReply]);
-            await saveConversationMessage(tenant.client_id, message.from, "assistant", selReply, agent.id);
+            // Botões de quantidade
+            await new Promise((r) => setTimeout(r, 600));
+            await sendWhatsAppRequest({
+              messaging_product: "whatsapp",
+              to: message.from,
+              type: "interactive",
+              interactive: {
+                type: "button",
+                body: { text: `Quantas unidades de *${truncate(p.name, 60)}* você quer?` },
+                action: {
+                  buttons: [
+                    { type: "reply", reply: { id: `qty_1_${p.id}`, title: "1 unidade" } },
+                    { type: "reply", reply: { id: `qty_2_${p.id}`, title: "2 unidades" } },
+                    { type: "reply", reply: { id: `qty_3_${p.id}`, title: "3 unidades" } },
+                  ],
+                },
+              },
+            }).catch(() => {
+              sendTextMessagesInSequence(message.from, [`Quantas unidades você quer?\nDigite um número (ex: 2)`]).catch(() => {});
+            });
+            const msg = `Ótima escolha! *${p.name}* por *${p.price_formatted}*. Quantas unidades?`;
+            await saveConversationMessage(tenant.client_id, message.from, "assistant", msg, agent.id);
+            return;
+          }
+        }
+        // Botão de quantidade (qty_N_PRODUCTID)
+        const isQtyBtn = message.buttonReplyId?.startsWith("qty_");
+        if (isQtyBtn) {
+          const parts = (message.buttonReplyId || "").split("_");
+          const qty = parseInt(parts[1]) || 1;
+          const productId = parseInt(parts[2]) || 0;
+          const product = productId > 0
+            ? (await wpToolCall(tenant, `/product-detail?id=${productId}`).catch(() => null))?.product
+            : convState.context?.selected_product;
+          if (product) {
+            const phone = leadContext?.phone || message.from;
+            const name  = leadContext?.name || "";
+            await saveConversationMessage(tenant.client_id, message.from, "user", `[quantidade: ${qty}x ${product.name}]`, agent.id);
+            if (convState.verified_email) {
+              const orderData = await createOrder(tenant, phone, convState.verified_email, name, [{ product_id: product.id, quantity: qty }]).catch(() => null);
+              if (orderData?.success) {
+                const reply = `✅ Pedido criado!\n\n📦 ${product.name} x${qty}\n💰 Total: ${orderData.total}\n\n💳 Pague aqui:\n${orderData.payment_url}`;
+                await sendTextMessagesInSequence(message.from, [reply]);
+                await saveConversationMessage(tenant.client_id, message.from, "assistant", reply, agent.id);
+                return;
+              }
+            }
+            // Pede email
+            await setConvState(message.from, tenant.client_id, {
+              awaiting: "email_for_order",
+              context: { pending_order: { product_id: product.id, product_name: product.name, price: product.price_formatted, quantity: qty } },
+            }).catch(() => {});
+            const total = (parseFloat(String(product.price || "0").replace(",", ".")) * qty).toFixed(2).replace(".", ",");
+            const askEmail = `📋 *Resumo do pedido:*\n• ${product.name} x${qty}\n• Total: R$ ${total}\n\nPara criar o pedido, me informe o *e-mail cadastrado* na Ladygriffe:`;
+            await sendTextMessagesInSequence(message.from, [askEmail]);
+            await saveConversationMessage(tenant.client_id, message.from, "assistant", askEmail, agent.id);
             return;
           }
         }
@@ -1726,6 +1782,11 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}) {
     prompt += "\n[AÇÃO NECESSÁRIA] Para consultar pedidos e rastreio, peça o e-mail cadastrado do cliente para verificar a identidade antes de mostrar qualquer dado de pedido.\n";
   }
 
+  if (tools.ask_quantity && tools.purchase_product) {
+    const p = tools.purchase_product;
+    prompt += `\n[AÇÃO] O cliente selecionou *${p.name}* (${p.price_formatted}). Já foram enviados botões de quantidade [1] [2] [3]. Aguarde a seleção — NÃO repita a pergunta de quantidade.\n`;
+  }
+
   if (tools.needs_email_for_order && tools.purchase_product) {
     const p = tools.purchase_product;
     const qty = tools.purchase_qty || 1;
@@ -1944,15 +2005,23 @@ function detectIntent(message) {
     return "product_inquiry";
   }
 
+  // ── Confirmação de seleção anterior (responde a uma pergunta do bot) ─
+  if (/^(quero\s*$|sim\s*$|pode\s*$|pode\s+ser\s*$|isso\s*$|esse\s*mesmo\s*$|confirmo\s*$|ok\s*$|fechou\s*$|bora\s*$|vai\s*$|add\s*$|adiciona\s*$|coloca\s*$|faz\s+(o\s+)?pedido\s*$|comprar\s*$|boa\s*$)/i.test(m.trim())) {
+    return "confirm_selection";
+  }
+
+  // ── Resposta de quantidade (só número ou palavra numeral) ──────────
+  if (/^(\d{1,2}|um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez)\s*(unidade|peça|kit|exemplar|par)s?\s*$/.test(m.trim()) || /^\d{1,2}\s*$/.test(m.trim())) {
+    return "quantity_response";
+  }
+
   // ── Detecta nomes de produtos isolados (mensagens curtas sem saudação) ──
-  // Ex: "la vie est belle", "asad elixir", "good girl 80ml", "sabah?"
   const stripped = m.replace(/[?!.,;:]/g, "").trim();
   const words = stripped.split(/\s+/).filter(Boolean);
-  const isSmallTalk = /^(oi\b|ol[áa]\b|hey\b|eae\b|e\s+a[íi]\b|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+(bem|bom|certo|ok)|td\s+bem|valeu|obrigad\w*|obg\b|vlw\b|ok\b|certo\b|sim\b|n[aã]o\b|perfeito\b|ótimo\b|otimo\b|show\b|beleza\b|at[eé]\s+mais|tchau\b|flw\b|abs\b|bjss?\b|pode\s+(ser|sim)\b|claro\b|com\s+certeza|entend\w+|compreend\w+)/i.test(stripped);
+  const isSmallTalk = /^(oi\b|ol[áa]\b|hey\b|eae\b|e\s+a[íi]\b|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+(bem|bom|certo|ok)|td\s+bem|valeu|obrigad\w*|obg\b|vlw\b|ok\b|certo\b|n[aã]o\b|perfeito\b|ótimo\b|otimo\b|show\b|beleza\b|at[eé]\s+mais|tchau\b|flw\b|abs\b|bjss?\b|pode\s+(ser|sim)\b|claro\b|com\s+certeza|entend\w+|compreend\w+)/i.test(stripped);
   const isOpenQuestion = /^(pode\s+me\s+ajudar|consegue\s+me\s+ajudar|preciso\s+de\s+ajuda|como\s+funciona|como\s+compro|onde\s+compro|como\s+faço|qual\s+[ée]\s+o\s+site|vocês\s+(vendem|trabalham|fazem|são)|o\s+que\s+(vocês?\s+vendem|é\s+a\s+loja)|faz\s+entrega)/i.test(stripped);
 
   if (!isSmallTalk && !isOpenQuestion && words.length >= 1 && words.length <= 8) {
-    // Se tem ao menos uma palavra com 3+ chars que não seja artigo/preposição
     const hasSubstantive = words.some(w => w.length >= 3 && !/^(de|do|da|dos|das|em|no|na|por|com|sem|que|uma|uns|umas|pra|pro|pros|pras|ate|atè)$/.test(w));
     if (hasSubstantive) return "product_inquiry";
   }
@@ -2066,19 +2135,55 @@ async function executeTools(intent, message, tenant, leadContext, convState) {
     const query = extractProductQuery(message);
     if (query.length >= 2) {
       const data = await searchProducts(tenant, query);
-      if (data?.products?.length) results.products = data.products;
+      if (data?.products?.length) {
+        results.products = data.products;
+        // Salva últimos produtos no estado para uso posterior
+        await setConvState(message.from || leadContext?.phone || "", tenant.client_id, {
+          context: { ...(convState.context || {}), last_products: data.products },
+        }).catch(() => {});
+      }
+    }
+    // Fallback: usa produto do contexto se a busca não encontrou nada
+    if (!results.products?.length) {
+      const ctxProduct = convState.context?.selected_product || convState.context?.last_products?.[0];
+      if (ctxProduct) results.products = [ctxProduct];
     }
   }
 
-  // ── Intenção de compra ───────────────────────────────────────────
-  if (intent === "purchase_intent" && results.products?.length > 0) {
-    const qty     = extractQuantity(message);
-    const product = results.products[0];
+  // ── Confirmação de seleção anterior ─────────────────────────────
+  if (intent === "confirm_selection" || intent === "quantity_response") {
+    const ctxProduct = convState.context?.selected_product || convState.context?.last_products?.[0];
+    if (ctxProduct) {
+      results.products = [ctxProduct];
+      // Força como purchase_intent
+      if (intent === "confirm_selection") {
+        results.confirm_for_purchase = true;
+      }
+    }
+  }
+
+  // ── Intenção de compra / confirmação / quantidade ───────────────
+  const isPurchaseFlow = intent === "purchase_intent" || intent === "confirm_selection" ||
+    (intent === "quantity_response" && convState.awaiting === "product_qty");
+
+  if (isPurchaseFlow && results.products?.length > 0) {
+    const qty     = extractQuantity(message) || (intent === "confirm_selection" ? 1 : 0);
+    const product = convState.context?.selected_product || results.products[0];
     const phone   = leadContext?.phone || "";
     const name    = leadContext?.name || "";
 
-    results.purchase_qty     = qty;
+    results.purchase_qty     = qty || 1;
     results.purchase_product = product;
+
+    // Se não temos a quantidade ainda, pede via botões
+    if (!qty && intent !== "quantity_response") {
+      results.ask_quantity = true;
+      await setConvState(phone || message, tenant.client_id, {
+        awaiting: "product_qty",
+        context: { ...(convState.context || {}), selected_product: product },
+      }).catch(() => {});
+      return results;
+    }
 
     // Email SEMPRE obrigatório — usa apenas o verificado nesta sessão
     if (convState.verified_email) {
