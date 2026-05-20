@@ -259,6 +259,18 @@ async function ensurePersistenceTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
+  const humanAttendanceTable = getTableName("human_attendance");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${humanAttendanceTable}\` (
+      phone VARCHAR(30) NOT NULL,
+      client_id VARCHAR(100) DEFAULT NULL,
+      attendant_name VARCHAR(191) DEFAULT NULL,
+      taken_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_activity DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (phone)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS \`${logsTable}\` (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -1014,6 +1026,14 @@ async function sendTextMessagesInSequence(to, chunks) {
 }
 
 async function handleIncomingMessageWithAssistant(message) {
+  // ── Verifica se conversa está em atendimento humano ──────────────────
+  if (isMySqlQueueEnabled()) {
+    const inHuman = await isPhoneInHumanAttendance(message.from).catch(() => false);
+    if (inHuman) {
+      addLog("assistant_skip", "Conversa em atendimento humano — IA silenciada.", { from: message.from });
+      return;
+    }
+  }
   // ── MODO 1: IA nativa na VPS (Gemini) ────────────────────────────────
   if (geminiApiKey && isMySqlQueueEnabled()) {
     try {
@@ -1509,9 +1529,17 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems) {
     }
 
     prompt += "\n[COMPORTAMENTO RECENTE]\n";
-    if (lead.cart_abandoned) prompt += "⚠️ Tem carrinho abandonado — visitou o checkout mas não finalizou a compra.\n";
+    if (lead.cart_abandoned)   prompt += "⚠️ Tem carrinho abandonado — iniciou o checkout mas não finalizou.\n";
+    if (lead.visited_checkout) prompt += "⚠️ Visitou a página de finalizar compra mas não pagou.\n";
     if (Array.isArray(lead.visited_pages) && lead.visited_pages.length) {
-      prompt += `Produtos/páginas visitados recentemente: ${lead.visited_pages.slice(0, 5).join(", ")}\n`;
+      prompt += `Produtos visitados: ${lead.visited_pages.slice(0, 5).join(", ")}\n`;
+    }
+    // Timeline completa de navegação (últimas 10 ações)
+    if (Array.isArray(lead.timeline) && lead.timeline.length > 0) {
+      prompt += "\n[HISTÓRICO DE NAVEGAÇÃO — do mais recente ao mais antigo]\n";
+      lead.timeline.slice(0, 10).forEach((item) => {
+        prompt += `• ${item.date} — ${item.action}\n`;
+      });
     }
   } else {
     prompt += "\n\n[CLIENTE]\nCliente ainda não identificado no sistema. Tente entender o que ele busca.\n";
@@ -1558,6 +1586,63 @@ async function callGeminiDirect(apiKey, systemPrompt, history, userMessage, audi
     { timeout: 30000 }
   );
   return response.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+}
+
+// ── Atendimento humano ────────────────────────────────────────────────
+async function isPhoneInHumanAttendance(phone) {
+  const pool = await getDbPool();
+  if (!pool) return false;
+  const [rows] = await pool.execute(
+    `SELECT 1 FROM \`${getTableName("human_attendance")}\` WHERE phone = ?`, [phone]
+  );
+  return rows.length > 0;
+}
+
+async function takeHumanAttendance(phone, clientId, attendantName) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(
+    `INSERT INTO \`${getTableName("human_attendance")}\` (phone, client_id, attendant_name)
+     VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE attendant_name=VALUES(attendant_name), last_activity=NOW()`,
+    [phone, clientId || null, attendantName || "Atendente"]
+  );
+}
+
+async function releaseHumanAttendance(phone) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(`DELETE FROM \`${getTableName("human_attendance")}\` WHERE phone = ?`, [phone]);
+}
+
+async function getRecentConversations(clientId = null, limit = 50) {
+  const pool = await getDbPool();
+  if (!pool) return [];
+  const conversationsTable = getTableName("conversations");
+  const attendanceTable    = getTableName("human_attendance");
+  let sql = `
+    SELECT
+      c.client_id, c.phone,
+      MAX(c.created_at) AS last_message_at,
+      COUNT(*) AS total_messages,
+      SUM(c.role = 'user') AS user_messages,
+      (SELECT LEFT(message,120) FROM \`${conversationsTable}\` c2
+       WHERE c2.phone = c.phone AND c2.client_id = c.client_id
+       ORDER BY created_at DESC LIMIT 1) AS last_message,
+      (SELECT role FROM \`${conversationsTable}\` c3
+       WHERE c3.phone = c.phone AND c3.client_id = c.client_id
+       ORDER BY created_at DESC LIMIT 1) AS last_role,
+      m.lead_name,
+      ha.attendant_name,
+      IF(ha.phone IS NOT NULL, 1, 0) AS human_mode
+    FROM \`${conversationsTable}\` c
+    LEFT JOIN \`${getTableName("phone_tenant_map")}\` m ON m.phone = c.phone
+    LEFT JOIN \`${attendanceTable}\` ha ON ha.phone = c.phone`;
+  const params = [];
+  if (clientId) { sql += " WHERE c.client_id = ?"; params.push(clientId); }
+  sql += " GROUP BY c.client_id, c.phone ORDER BY last_message_at DESC LIMIT ?";
+  params.push(Number(limit));
+  const [rows] = await pool.execute(sql, params);
+  return rows;
 }
 
 // ── Campanha: Sync de leads do WordPress ──────────────────────────────
@@ -2400,7 +2485,101 @@ router.get("/api/campaigns/:id/results", async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ── Diagnóstico: tudo sobre um número de telefone ─────────────────────
+// ── Atendimento humano: listar conversas recentes ─────────────────────
+router.get("/api/conversations/recent", async (req, res) => {
+  try {
+    const clientId = req.query.client_id || null;
+    const limit    = Number(req.query.limit || 50);
+    const rows     = await getRecentConversations(clientId, limit);
+    res.json({ success: true, conversations: rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Listar quem está em atendimento humano
+router.get("/api/attendance", async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (!pool) return res.json({ success: true, attending: [] });
+    const [rows] = await pool.query(`SELECT * FROM \`${getTableName("human_attendance")}\` ORDER BY last_activity DESC`);
+    res.json({ success: true, attending: rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Assumir atendimento de um número
+router.post("/api/attendance/take", async (req, res) => {
+  try {
+    const { phone, clientId, attendantName } = req.body || {};
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+    await takeHumanAttendance(phone, clientId, attendantName);
+    addLog("attendance_take", `Atendimento humano assumido para ${phone}.`, { attendantName });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Liberar número de volta para a IA
+router.post("/api/attendance/release", async (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+    await releaseHumanAttendance(phone);
+    addLog("attendance_release", `Conversa ${phone} liberada de volta para a IA.`);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Enviar mensagem de texto como atendente humano
+router.post("/api/attendance/send-text", async (req, res) => {
+  try {
+    validateConfig();
+    const { phone, text } = req.body || {};
+    if (!phone || !text) return res.status(400).json({ success: false, error: "phone e text obrigatórios" });
+    const data = await sendWhatsAppRequest({
+      messaging_product: "whatsapp", to: phone, type: "text",
+      text: { body: text, preview_url: false },
+    });
+    const messageId = data.messages?.[0]?.id || null;
+    // Salvar no histórico como "human"
+    const pool = await getDbPool();
+    if (pool) {
+      const [mapped] = await pool.execute(
+        `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
+      );
+      const cid = mapped[0]?.client_id || "manual";
+      await pool.execute(
+        `INSERT INTO \`${getTableName("conversations")}\` (client_id, phone, role, message, created_at) VALUES (?, ?, 'human', ?, ?)`,
+        [cid, phone, text, nowMysql()]
+      );
+      await pool.execute(
+        `UPDATE \`${getTableName("human_attendance")}\` SET last_activity = NOW() WHERE phone = ?`, [phone]
+      );
+    }
+    res.json({ success: true, messageId });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.response?.data || e.message });
+  }
+});
+
+// Enviar imagem/vídeo por URL
+router.post("/api/attendance/send-media", async (req, res) => {
+  try {
+    validateConfig();
+    const { phone, mediaUrl, mediaType = "image", caption = "" } = req.body || {};
+    if (!phone || !mediaUrl) return res.status(400).json({ success: false, error: "phone e mediaUrl obrigatórios" });
+    const typeMap = { image: "image", video: "video", audio: "audio", document: "document" };
+    const waType = typeMap[mediaType] || "image";
+    const mediaObj = { link: mediaUrl };
+    if (caption && waType !== "audio") mediaObj.caption = caption;
+    const data = await sendWhatsAppRequest({
+      messaging_product: "whatsapp", to: phone, type: waType,
+      [waType]: mediaObj,
+    });
+    res.json({ success: true, messageId: data.messages?.[0]?.id || null });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.response?.data || e.message });
+  }
+});
+
+// Diagnóstico: tudo sobre um número de telefone ─────────────────────
 router.get("/api/debug/phone/:phone", async (req, res) => {
   const phone = String(req.params.phone).replace(/\D/g, "");
   const result = { phone, checkedAt: new Date().toISOString() };
