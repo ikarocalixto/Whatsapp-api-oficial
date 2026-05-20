@@ -2035,7 +2035,10 @@ async function createOrder(tenant, phone, email, name, items) {
 function extractProductQuery(message) {
   const m = (message || "").toLowerCase();
   const cleaned = m
-    .replace(/\b(pre[çc]o|preco|quanto|cust\w*|valor|quero|me\s+manda|link|enviar?|informa\w*|qual|quais|como|sobre|ver|mostra\w*|diz\w*|fala\w*|passa\w*|sabe\w*|consegue\w*|pode\w*|existe\w*|manda\w*|voc[eê]\s+tem|tem\s+esse|tem\s+essa|t[áa]\b)\b/gi, "")
+    .replace(/\b(pre[çc]o|preco|quanto|cust\w*|valor|quero|me\s+manda|link|enviar?|informa\w*|qual|quais|como|sobre|ver|mostra\w*|diz\w*|fala\w*|passa\w*|sabe\w*|consegue\w*|pode\w*|existe\w*|manda\w*|voc[eê]\s+tem|tem\s+esse|tem\s+essa|t[áa]\b|comprar|pedir|encomendar|adicionar|finalizar|pedido|carrinho)\b/gi, "")
+    .replace(/\b(\d+\s*)?(unidade|peça|kit|item|exemplar|par)s?\b/gi, "")
+    .replace(/\b(um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez)\b/gi, "")
+    .replace(/\b\d+\b/g, "")
     .replace(/\b(oi|ol[áa]|boa\s+tarde|boa\s+noite|bom\s+dia|tudo\s+bem|pfv|pf|por\s+favor|obrigad[oa])\b/gi, "")
     .replace(/\b(o|a|os|as|um|uma|do|da|de|dos|das|em|no|na|nos|nas|por|para|com|sem|que|eu|voce|me|meu|minha|seu|sua|esse|esta|este|essa)\b/gi, "")
     .replace(/[?!.,;:]/g, "").replace(/\s+/g, " ").trim();
