@@ -1577,7 +1577,7 @@ async function callGeminiDirect(apiKey, systemPrompt, history, userMessage, audi
   }
   contents.push({ role: "user", parts: userParts });
   const response = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1/models/${geminiModel}:generateContent?key=${apiKey}`,
     {
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents,
