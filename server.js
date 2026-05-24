@@ -1068,7 +1068,11 @@ async function handleIncomingMessageWithAssistant(message) {
         addLog("assistant_skip", "Nenhum agente configurado para o tenant.", { clientId: tenant.client_id });
         return _handleWithWordPress(message);
       }
-      const leadContext = await fetchLeadContextFromWP(tenant, message.from).catch(() => null);
+      let leadContext = await fetchLeadContextFromWP(tenant, message.from).catch(() => null);
+      if (!leadContext?.found) {
+        leadContext = await fetchLeadContextFromCache(tenant.client_id, message.from).catch(() => null);
+        if (leadContext?.found) addLog("assistant_info", "Lead context lido do cache local da VPS.", { from: message.from });
+      }
       const history = await getConversationHistory(tenant.client_id, message.from, 10);
       const knowledgeItems = getRelevantKnowledge(await getKnowledgeItems(agent.id), userText);
       // Declara audioBase64 antes de qualquer uso
@@ -1716,6 +1720,40 @@ async function fetchLeadContextFromWP(tenant, phone) {
   return response.data || null;
 }
 
+// ── IA: Contexto do lead no cache local da VPS ────────────────────────
+async function fetchLeadContextFromCache(clientId, phone) {
+  const pool = await getDbPool();
+  if (!pool) return null;
+  const phoneSuffix = String(phone).replace(/\D/g, "").slice(-9);
+  const [rows] = await pool.execute(
+    `SELECT * FROM \`${getTableName("leads_cache")}\`
+     WHERE client_id = ? AND (phone = ? OR phone LIKE ?)
+     ORDER BY last_synced_at DESC LIMIT 1`,
+    [clientId, phone, `%${phoneSuffix}`]
+  );
+  if (!rows.length) return null;
+  const lead = rows[0];
+  return {
+    found: true,
+    phone: lead.phone,
+    name: lead.name || null,
+    email: lead.email || null,
+    score: lead.score || 0,
+    stage: lead.stage || null,
+    utm_source: lead.utm_source || null,
+    utm_medium: lead.utm_medium || null,
+    utm_campaign: lead.utm_campaign || null,
+    cart_abandoned: Boolean(lead.cart_abandoned),
+    total_orders: lead.total_orders || 0,
+    last_order_date: lead.last_order_date || null,
+    last_order_product: lead.last_order_product || null,
+    total_spent: lead.total_spent || 0,
+    days_since_last_purchase: lead.days_since_last_purchase || null,
+    visited_pages: safeJsonParse(lead.visited_pages_json) || [],
+    qualification: safeJsonParse(lead.qualification_json) || null,
+  };
+}
+
 // ── IA: Conhecimento relevante ─────────────────────────────────────────
 function getRelevantKnowledge(items, messageText, limit = 5) {
   if (!items.length) return [];
@@ -1734,7 +1772,9 @@ function getRelevantKnowledge(items, messageText, limit = 5) {
 
 // ── IA: Prompt personalizado ───────────────────────────────────────────
 function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}) {
-  let prompt = agent.prompt || "";
+  const basePrompt = (agent.prompt || "").trim();
+  if (!basePrompt) return "";
+  let prompt = basePrompt;
 
   // ── Perfil do lead (dados do WordPress) ──
   if (lead && lead.found) {
@@ -1890,13 +1930,16 @@ async function callGeminiDirect(apiKey, systemPrompt, history, userMessage, audi
     userParts.push({ text: userMessage || " " });
   }
   contents.push({ role: "user", parts: userParts });
+  const geminiBody = {
+    contents,
+    generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+  };
+  if (systemPrompt) {
+    geminiBody.systemInstruction = { parts: [{ text: systemPrompt }] };
+  }
   const response = await axios.post(
     `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
-    {
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents,
-      generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
-    },
+    geminiBody,
     { timeout: 30000 }
   );
   return response.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
@@ -2975,8 +3018,8 @@ router.get("/api/agents", async (_req, res) => {
 
 router.post("/api/agents", async (req, res) => {
   try {
-    const { name, prompt } = req.body || {};
-    if (!name || !prompt) return res.status(400).json({ success: false, error: "name e prompt são obrigatórios." });
+    const { name } = req.body || {};
+    if (!name) return res.status(400).json({ success: false, error: "name é obrigatório." });
     await upsertAgent(req.body);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
