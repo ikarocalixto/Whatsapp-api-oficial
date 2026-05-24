@@ -1556,29 +1556,39 @@ async function upsertAgent(data) {
   const adJson = assignedDomains ? JSON.stringify(assignedDomains) : null;
   const tkJson = transferKeywords ? JSON.stringify(transferKeywords) : null;
   const activeVal = active !== false ? 1 : 0;
+  const promptVal = prompt || "";
 
   if (id) {
-    // Atualiza pelo ID
     await pool.execute(
       `UPDATE \`${getTableName("agents")}\`
        SET name=?, prompt=?, keywords_json=?, assigned_domains_json=?, transfer_keywords_json=?,
            transfer_number=?, icon=?, description=?, active=?
        WHERE id=?`,
-      [name, prompt, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, id]
+      [name, promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, id]
+    );
+    return;
+  }
+
+  // Busca agente existente pelo nome para não criar duplicata
+  const [existing] = await pool.execute(
+    `SELECT id FROM \`${getTableName("agents")}\` WHERE name = ? ORDER BY id DESC LIMIT 1`,
+    [name]
+  );
+
+  if (existing.length > 0) {
+    await pool.execute(
+      `UPDATE \`${getTableName("agents")}\`
+       SET prompt=?, keywords_json=?, assigned_domains_json=?, transfer_keywords_json=?,
+           transfer_number=?, icon=?, description=?, active=?
+       WHERE id=?`,
+      [promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, existing[0].id]
     );
   } else {
-    // Upsert pelo nome — evita duplicatas ao sincronizar do WordPress
     await pool.execute(
       `INSERT INTO \`${getTableName("agents")}\`
          (name, prompt, keywords_json, assigned_domains_json, transfer_keywords_json, transfer_number, icon, description, active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         prompt=VALUES(prompt), keywords_json=VALUES(keywords_json),
-         assigned_domains_json=VALUES(assigned_domains_json),
-         transfer_keywords_json=VALUES(transfer_keywords_json),
-         transfer_number=VALUES(transfer_number), icon=VALUES(icon),
-         description=VALUES(description), active=VALUES(active)`,
-      [name, prompt, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal]
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name, promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal]
     );
   }
 }
