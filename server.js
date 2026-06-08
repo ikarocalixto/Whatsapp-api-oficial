@@ -1642,9 +1642,9 @@ async function getConversationHistory(clientId, phone, limit = 10) {
   const pool = await getDbPool();
   if (!pool) return [];
   const [rows] = await pool.execute(
-    `SELECT role, message, agent_id, created_at FROM \`${getTableName("conversations")}\`
+    `SELECT id, role, message, agent_id, created_at FROM \`${getTableName("conversations")}\`
      WHERE client_id = ? AND phone = ?
-     ORDER BY created_at DESC LIMIT ?`,
+     ORDER BY created_at DESC, id DESC LIMIT ?`,
     [clientId, phone, Number(limit)]
   );
   return rows.reverse();
@@ -2547,6 +2547,14 @@ async function sendCampaignBatch(campaignId, limit = 50) {
           to: recipient.phone, templateName: campaign.template_name || null,
           acceptedAt: new Date().toISOString(), latestStatus: "accepted", apiAccepted: true });
       }
+      // Registrar no histórico para aparecer na conversa do atendimento
+      try {
+        const cid = recipient.client_id || "automation";
+        const logMsg = campaign.message_type === "template" && campaign.template_name
+          ? `📨 [Campanha] Modelo enviado: ${campaign.template_name}`
+          : `📨 [Campanha] ${campaign.message_text || ""}`;
+        await saveConversationMessage(cid, recipient.phone, "human", logMsg, null);
+      } catch (_) { /* não bloquear o envio se o log falhar */ }
       sent++;
     } catch (_err) {
       await pool.execute(`UPDATE \`${recipientsTable}\` SET status = 'failed', failed_at = ? WHERE id = ?`, [nowMysql(), recipient.id]);
@@ -2802,6 +2810,18 @@ router.post("/send-template", async (req, res) => {
       input: data.contacts?.[0]?.input || to,
       waId: data.contacts?.[0]?.wa_id || null,
     });
+
+    // Registrar no histórico para aparecer na conversa do atendimento
+    try {
+      const pool = await getDbPool();
+      if (pool) {
+        const [mapped] = await pool.execute(
+          `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [to]
+        );
+        const cid = mapped[0]?.client_id || "automation";
+        await saveConversationMessage(cid, to, "human", `📨 [Automação] Modelo enviado: ${templateName}`, null);
+      }
+    } catch (_) { /* não bloquear o envio se o log falhar */ }
 
     addLog("send_template", `Template ${templateName} enviado para ${to}.`, data);
     return res.json({ success: true, data });
@@ -3346,6 +3366,50 @@ router.post("/api/attendance/send-media", async (req, res) => {
     res.json({ success: true, messageId: data.messages?.[0]?.id || null });
   } catch (e) {
     res.status(500).json({ success: false, error: e.response?.data || e.message });
+  }
+});
+
+// Enviar modelo (template) aprovado — usado para reabrir conversa após a janela de 24h
+router.post("/api/attendance/send-template", async (req, res) => {
+  try {
+    validateConfig();
+    const { phone, templateName, languageCode = "pt_BR", bodyParameters = [] } = req.body || {};
+    if (!phone || !templateName) return res.status(400).json({ success: false, error: "phone e templateName obrigatórios" });
+
+    const components = [];
+    if (Array.isArray(bodyParameters) && bodyParameters.length > 0) {
+      components.push({
+        type: "body",
+        parameters: bodyParameters.map((text) => ({ type: "text", text: String(text) })),
+      });
+    }
+
+    const data = await sendWhatsAppRequest({
+      messaging_product: "whatsapp", to: phone, type: "template",
+      template: { name: templateName, language: { code: languageCode }, ...(components.length ? { components } : {}) },
+    });
+    const messageId = data.messages?.[0]?.id || null;
+
+    const pool = await getDbPool();
+    if (pool) {
+      const [mapped] = await pool.execute(
+        `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
+      );
+      const cid = mapped[0]?.client_id || "manual";
+      await pool.execute(
+        `INSERT INTO \`${getTableName("conversations")}\` (client_id, phone, role, message, created_at) VALUES (?, ?, 'human', ?, ?)`,
+        [cid, phone, `📨 Modelo enviado: ${templateName}`, nowMysql()]
+      );
+      await pool.execute(
+        `UPDATE \`${getTableName("human_attendance")}\` SET last_activity = NOW() WHERE phone = ?`, [phone]
+      );
+    }
+
+    addLog("send_template", `Template ${templateName} enviado para ${phone} (atendimento).`, data);
+    res.json({ success: true, messageId });
+  } catch (e) {
+    addLog("error", "Falha ao enviar template (atendimento).", e.response?.data || e.message);
+    res.status(e.response?.status || 500).json({ success: false, error: e.response?.data || e.message });
   }
 });
 
