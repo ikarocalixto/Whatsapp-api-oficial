@@ -992,6 +992,16 @@ function extractWebhookMessages(body) {
             audioVoice: Boolean(message.audio?.voice),
             imageCaption: message.image?.caption || null,
             documentCaption: message.document?.caption || null,
+            imageId: message.image?.id || null,
+            imageMimeType: message.image?.mime_type || null,
+            videoId: message.video?.id || null,
+            videoMimeType: message.video?.mime_type || null,
+            videoCaption: message.video?.caption || null,
+            documentId: message.document?.id || null,
+            documentMimeType: message.document?.mime_type || null,
+            documentFilename: message.document?.filename || null,
+            stickerId: message.sticker?.id || null,
+            stickerMimeType: message.sticker?.mime_type || null,
           });
         }
       }
@@ -1059,6 +1069,36 @@ async function downloadWhatsAppMedia(mediaId) {
   };
 }
 
+// ── Identifica client_id de um telefone sem resolver o tenant inteiro ────
+async function getClientIdForPhone(phone) {
+  const pool = await getDbPool();
+  if (!pool) return null;
+  const [rows] = await pool.execute(
+    `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
+  );
+  return rows[0]?.client_id || null;
+}
+
+// ── Monta o conteúdo a ser salvo em conversations para uma mensagem recebida ──
+function buildIncomingMessageBody(message) {
+  if (message.imageId) {
+    return JSON.stringify({ kind: "media", mediaType: "image", mediaId: message.imageId, mime: message.imageMimeType, caption: message.imageCaption || "" });
+  }
+  if (message.videoId) {
+    return JSON.stringify({ kind: "media", mediaType: "video", mediaId: message.videoId, mime: message.videoMimeType, caption: message.videoCaption || "" });
+  }
+  if (message.audioId) {
+    return JSON.stringify({ kind: "media", mediaType: "audio", mediaId: message.audioId, mime: message.audioMimeType, caption: "" });
+  }
+  if (message.documentId) {
+    return JSON.stringify({ kind: "media", mediaType: "document", mediaId: message.documentId, mime: message.documentMimeType, caption: message.documentCaption || "", filename: message.documentFilename || "" });
+  }
+  if (message.stickerId) {
+    return JSON.stringify({ kind: "media", mediaType: "image", mediaId: message.stickerId, mime: message.stickerMimeType, caption: "" });
+  }
+  return getIncomingMessageText(message) || "[mensagem]";
+}
+
 async function requestWordPressAssistantReply(message) {
   if (!wordpressAssistantUrl || !wordpressAssistantToken) {
     return null;
@@ -1107,6 +1147,15 @@ async function sendTextMessagesInSequence(to, chunks) {
 }
 
 async function handleIncomingMessageWithAssistant(message) {
+  // ── Persiste a mensagem recebida (texto ou mídia) independente do modo ──
+  if (isMySqlQueueEnabled()) {
+    try {
+      const cid = (await getClientIdForPhone(message.from)) || "manual";
+      await saveConversationMessage(cid, message.from, "user", buildIncomingMessageBody(message), null);
+    } catch (e) {
+      addLog("conversation_save_error", "Falha ao salvar mensagem recebida.", { from: message.from, error: e.message });
+    }
+  }
   // ── Verifica se conversa está em atendimento humano ──────────────────
   if (isMySqlQueueEnabled()) {
     const inHuman = await isPhoneInHumanAttendance(message.from).catch(() => false);
@@ -1293,8 +1342,6 @@ async function handleIncomingMessageWithAssistant(message) {
         addLog("assistant_skip", "Gemini nao retornou resposta.", { from: message.from });
         return;
       }
-      const storedUserMsg = audioBase64 ? "[áudio]" : (userText || "[mensagem]");
-      await saveConversationMessage(tenant.client_id, message.from, "user", storedUserMsg, agent.id);
       await saveConversationMessage(tenant.client_id, message.from, "assistant", reply, agent.id);
       const transferKeywords = safeJsonParse(agent.transfer_keywords_json) || [];
       const shouldTransfer = transferKeywords.some((kw) => (userText || "").toLowerCase().includes(kw.toLowerCase()));
@@ -3672,18 +3719,21 @@ router.post("/api/attendance/send-text", async (req, res) => {
 router.post("/api/attendance/send-media", async (req, res) => {
   try {
     validateConfig();
-    const { phone, mediaUrl, mediaType = "image", caption = "" } = req.body || {};
+    const { phone, mediaUrl, mediaType = "image", caption = "", filename = "" } = req.body || {};
     if (!phone || !mediaUrl) return res.status(400).json({ success: false, error: "phone e mediaUrl obrigatórios" });
     const typeMap = { image: "image", video: "video", audio: "audio", document: "document" };
     const waType = typeMap[mediaType] || "image";
     const mediaObj = { link: mediaUrl };
     if (caption && waType !== "audio") mediaObj.caption = caption;
+
+    let messageId = null;
+    let fallback = null;
     try {
       const data = await sendWhatsAppRequest({
         messaging_product: "whatsapp", to: phone, type: waType,
         [waType]: mediaObj,
       });
-      res.json({ success: true, messageId: data.messages?.[0]?.id || null });
+      messageId = data.messages?.[0]?.id || null;
     } catch (e) {
       // Áudio gravado pelo navegador pode vir em formato não aceito pela Meta como
       // "audio" (ex: audio/webm). Tenta reenviar como documento para não perder a mensagem.
@@ -3692,10 +3742,53 @@ router.post("/api/attendance/send-media", async (req, res) => {
           messaging_product: "whatsapp", to: phone, type: "document",
           document: { link: mediaUrl },
         });
-        return res.json({ success: true, messageId: data.messages?.[0]?.id || null, fallback: "document" });
+        messageId = data.messages?.[0]?.id || null;
+        fallback = "document";
+      } else {
+        throw e;
       }
-      throw e;
     }
+
+    // Salvar no histórico como "human", com marcador de mídia
+    const pool = await getDbPool();
+    if (pool) {
+      const [mapped] = await pool.execute(
+        `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
+      );
+      const cid = mapped[0]?.client_id || "manual";
+      const marker = JSON.stringify({
+        kind: "media",
+        mediaType,
+        url: mediaUrl,
+        caption: caption || "",
+        filename: filename || "",
+      });
+      await pool.execute(
+        `INSERT INTO \`${getTableName("conversations")}\` (client_id, phone, role, message, created_at) VALUES (?, ?, 'human', ?, ?)`,
+        [cid, phone, marker, nowMysql()]
+      );
+      await pool.execute(
+        `UPDATE \`${getTableName("human_attendance")}\` SET last_activity = NOW() WHERE phone = ?`, [phone]
+      );
+    }
+
+    res.json({ success: true, messageId, fallback });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.response?.data || e.message });
+  }
+});
+
+// Servir mídia recebida do WhatsApp (proxy do Meta Graph API)
+router.get("/api/attendance/media/:mediaId", async (req, res) => {
+  try {
+    validateConfig();
+    const { mediaId } = req.params;
+    if (!mediaId) return res.status(400).json({ success: false, error: "mediaId obrigatório" });
+    const { mimeType, base64 } = await downloadWhatsAppMedia(mediaId);
+    const buffer = Buffer.from(base64, "base64");
+    res.set("Content-Type", mimeType || "application/octet-stream");
+    res.set("Cache-Control", "private, max-age=3600");
+    res.send(buffer);
   } catch (e) {
     res.status(500).json({ success: false, error: e.response?.data || e.message });
   }
