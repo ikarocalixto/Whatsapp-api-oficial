@@ -462,6 +462,68 @@ async function ensurePersistenceTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
+  // ── Tabelas do hub de atendimento (atribuição, tags, comentários, foto) ─
+  const assignmentsTable = getTableName("conversation_assignments");
+  const tagsTable = getTableName("conversation_tags");
+  const commentsTable = getTableName("conversation_comments");
+  const photosTable = getTableName("conversation_photos");
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${assignmentsTable}\` (
+      phone VARCHAR(30) NOT NULL,
+      client_id VARCHAR(100) DEFAULT NULL,
+      attendant_id BIGINT UNSIGNED DEFAULT NULL,
+      attendant_name VARCHAR(191) DEFAULT NULL,
+      assigned_at DATETIME DEFAULT NULL,
+      assigned_by_id BIGINT UNSIGNED DEFAULT NULL,
+      assigned_by_name VARCHAR(191) DEFAULT NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (phone),
+      KEY idx_attendant (attendant_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${tagsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      phone VARCHAR(30) NOT NULL,
+      client_id VARCHAR(100) DEFAULT NULL,
+      tag VARCHAR(60) NOT NULL,
+      color VARCHAR(20) DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by_id BIGINT UNSIGNED DEFAULT NULL,
+      created_by_name VARCHAR(191) DEFAULT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uniq_phone_tag (phone, tag),
+      KEY idx_phone (phone)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${commentsTable}\` (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      phone VARCHAR(30) NOT NULL,
+      client_id VARCHAR(100) DEFAULT NULL,
+      comment TEXT NOT NULL,
+      author_id BIGINT UNSIGNED DEFAULT NULL,
+      author_name VARCHAR(191) DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_phone_created (phone, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${photosTable}\` (
+      phone VARCHAR(30) NOT NULL,
+      photo_url VARCHAR(500) DEFAULT NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      updated_by_id BIGINT UNSIGNED DEFAULT NULL,
+      updated_by_name VARCHAR(191) DEFAULT NULL,
+      PRIMARY KEY (phone)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
   return true;
 }
 
@@ -1981,9 +2043,144 @@ async function releaseHumanAttendance(phone) {
   await pool.execute(`DELETE FROM \`${getTableName("human_attendance")}\` WHERE phone = ?`, [phone]);
 }
 
-async function getRecentConversations(clientId = null, limit = 50) {
+// ── Atribuição de conversas a atendentes ───────────────────────────────
+async function getAssignment(phone) {
+  const pool = await getDbPool();
+  if (!pool) return null;
+  const [rows] = await pool.execute(
+    `SELECT attendant_id, attendant_name, assigned_at, assigned_by_id, assigned_by_name
+     FROM \`${getTableName("conversation_assignments")}\` WHERE phone = ?`, [phone]
+  );
+  return rows[0] || null;
+}
+
+async function clearAssignment(phone) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(`DELETE FROM \`${getTableName("conversation_assignments")}\` WHERE phone = ?`, [phone]);
+}
+
+async function setAssignment(phone, clientId, attendantId, attendantName, assignedById, assignedByName) {
+  if (!attendantId) {
+    await clearAssignment(phone);
+    return;
+  }
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(
+    `INSERT INTO \`${getTableName("conversation_assignments")}\`
+       (phone, client_id, attendant_id, attendant_name, assigned_at, assigned_by_id, assigned_by_name)
+     VALUES (?, ?, ?, ?, NOW(), ?, ?)
+     ON DUPLICATE KEY UPDATE
+       attendant_id = VALUES(attendant_id),
+       attendant_name = VALUES(attendant_name),
+       assigned_at = NOW(),
+       assigned_by_id = VALUES(assigned_by_id),
+       assigned_by_name = VALUES(assigned_by_name)`,
+    [phone, clientId || null, attendantId, attendantName || null, assignedById || null, assignedByName || null]
+  );
+}
+
+// ── Tags de conversa ────────────────────────────────────────────────────
+async function getConversationTags(phone) {
   const pool = await getDbPool();
   if (!pool) return [];
+  const [rows] = await pool.execute(
+    `SELECT tag, color FROM \`${getTableName("conversation_tags")}\` WHERE phone = ? ORDER BY id`, [phone]
+  );
+  return rows;
+}
+
+async function getTagsForPhones(phones) {
+  const map = new Map();
+  if (!Array.isArray(phones) || phones.length === 0) return map;
+  const pool = await getDbPool();
+  if (!pool) return map;
+  const placeholders = phones.map(() => "?").join(",");
+  const [rows] = await pool.query(
+    `SELECT phone, tag, color FROM \`${getTableName("conversation_tags")}\` WHERE phone IN (${placeholders}) ORDER BY id`,
+    phones
+  );
+  for (const row of rows) {
+    if (!map.has(row.phone)) map.set(row.phone, []);
+    map.get(row.phone).push({ tag: row.tag, color: row.color });
+  }
+  return map;
+}
+
+async function addConversationTag(phone, clientId, tag, color, byId, byName) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(
+    `INSERT INTO \`${getTableName("conversation_tags")}\`
+       (phone, client_id, tag, color, created_by_id, created_by_name)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE color = VALUES(color)`,
+    [phone, clientId || null, tag, color || null, byId || null, byName || null]
+  );
+}
+
+async function removeConversationTag(phone, tag) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(
+    `DELETE FROM \`${getTableName("conversation_tags")}\` WHERE phone = ? AND tag = ?`, [phone, tag]
+  );
+}
+
+// ── Comentários internos de conversa ───────────────────────────────────
+async function getConversationComments(phone, limit = 50) {
+  const pool = await getDbPool();
+  if (!pool) return [];
+  const [rows] = await pool.execute(
+    `SELECT id, comment, author_id, author_name, created_at
+     FROM \`${getTableName("conversation_comments")}\`
+     WHERE phone = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+    [phone, Number(limit)]
+  );
+  return rows.reverse();
+}
+
+async function addConversationComment(phone, clientId, comment, authorId, authorName) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  await pool.execute(
+    `INSERT INTO \`${getTableName("conversation_comments")}\`
+       (phone, client_id, comment, author_id, author_name)
+     VALUES (?, ?, ?, ?, ?)`,
+    [phone, clientId || null, comment, authorId || null, authorName || null]
+  );
+}
+
+// ── Foto manual da conversa ─────────────────────────────────────────────
+async function getConversationPhoto(phone) {
+  const pool = await getDbPool();
+  if (!pool) return null;
+  const [rows] = await pool.execute(
+    `SELECT photo_url FROM \`${getTableName("conversation_photos")}\` WHERE phone = ?`, [phone]
+  );
+  return rows[0]?.photo_url || null;
+}
+
+async function setConversationPhoto(phone, photoUrl, byId, byName) {
+  const pool = await getDbPool();
+  if (!pool) return;
+  if (!photoUrl) {
+    await pool.execute(`DELETE FROM \`${getTableName("conversation_photos")}\` WHERE phone = ?`, [phone]);
+    return;
+  }
+  await pool.execute(
+    `INSERT INTO \`${getTableName("conversation_photos")}\` (phone, photo_url, updated_by_id, updated_by_name)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE photo_url = VALUES(photo_url), updated_by_id = VALUES(updated_by_id), updated_by_name = VALUES(updated_by_name)`,
+    [phone, photoUrl, byId || null, byName || null]
+  );
+}
+
+async function getRecentConversations(clientId = null, limit = 50, options = {}) {
+  const pool = await getDbPool();
+  if (!pool) return [];
+  const { attendantId = null, isManager = false } = options;
   const conversationsTable = getTableName("conversations");
   const attendanceTable    = getTableName("human_attendance");
   let sql = `
@@ -2000,15 +2197,31 @@ async function getRecentConversations(clientId = null, limit = 50) {
        ORDER BY created_at DESC LIMIT 1) AS last_role,
       m.lead_name,
       ha.attendant_name,
-      IF(ha.phone IS NOT NULL, 1, 0) AS human_mode
+      IF(ha.phone IS NOT NULL, 1, 0) AS human_mode,
+      ca.attendant_id AS assigned_attendant_id,
+      ca.attendant_name AS assigned_attendant_name,
+      cp.photo_url AS photo_url
     FROM \`${conversationsTable}\` c
     LEFT JOIN \`${getTableName("phone_tenant_map")}\` m ON m.phone = c.phone
-    LEFT JOIN \`${attendanceTable}\` ha ON ha.phone = c.phone`;
+    LEFT JOIN \`${attendanceTable}\` ha ON ha.phone = c.phone
+    LEFT JOIN \`${getTableName("conversation_assignments")}\` ca ON ca.phone = c.phone
+    LEFT JOIN \`${getTableName("conversation_photos")}\` cp ON cp.phone = c.phone`;
   const params = [];
-  if (clientId) { sql += " WHERE c.client_id = ?"; params.push(clientId); }
+  const where = [];
+  if (clientId) { where.push("c.client_id = ?"); params.push(clientId); }
+  if (attendantId && !isManager) {
+    where.push("(ca.attendant_id = ? OR ca.attendant_id IS NULL)");
+    params.push(Number(attendantId));
+  }
+  if (where.length) sql += " WHERE " + where.join(" AND ");
   sql += " GROUP BY c.client_id, c.phone ORDER BY last_message_at DESC LIMIT ?";
   params.push(Number(limit));
   const [rows] = await pool.execute(sql, params);
+
+  const tagsMap = await getTagsForPhones(rows.map((r) => r.phone));
+  for (const row of rows) {
+    row.tags = tagsMap.get(row.phone) || [];
+  }
   return rows;
 }
 
@@ -3278,9 +3491,11 @@ router.get("/api/campaigns/:id/results", async (req, res) => {
 // ── Atendimento humano: listar conversas recentes ─────────────────────
 router.get("/api/conversations-recent", async (req, res) => {
   try {
-    const clientId = req.query.client_id || null;
-    const limit    = Number(req.query.limit || 50);
-    const rows     = await getRecentConversations(clientId, limit);
+    const clientId    = req.query.client_id || null;
+    const limit       = Number(req.query.limit || 50);
+    const attendantId = req.query.attendant_id ? Number(req.query.attendant_id) : null;
+    const isManager   = req.query.is_manager === "1";
+    const rows        = await getRecentConversations(clientId, limit, { attendantId, isManager });
     res.json({ success: true, conversations: rows });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -3298,9 +3513,10 @@ router.get("/api/attendance", async (req, res) => {
 // Assumir atendimento de um número
 router.post("/api/attendance/take", async (req, res) => {
   try {
-    const { phone, clientId, attendantName } = req.body || {};
+    const { phone, clientId, attendantName, attendantId } = req.body || {};
     if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
     await takeHumanAttendance(phone, clientId, attendantName);
+    await setAssignment(phone, clientId, attendantId, attendantName, attendantId, attendantName);
     addLog("attendance_take", `Atendimento humano assumido para ${phone}.`, { attendantName });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -3313,6 +3529,109 @@ router.post("/api/attendance/release", async (req, res) => {
     if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
     await releaseHumanAttendance(phone);
     addLog("attendance_release", `Conversa ${phone} liberada de volta para a IA.`);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Ver atribuição de uma conversa
+router.get("/api/attendance/assignment", async (req, res) => {
+  try {
+    const { phone } = req.query || {};
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+    const assignment = await getAssignment(phone);
+    res.json({ success: true, assignment });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Transferir/atribuir conversa a um atendente
+router.post("/api/attendance/assign", async (req, res) => {
+  try {
+    const { phone, clientId, targetAttendantId, targetAttendantName, assignedById, assignedByName, isManager } = req.body || {};
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+
+    if (!isManager) {
+      const current = await getAssignment(phone);
+      if (current && current.attendant_id && Number(current.attendant_id) !== Number(assignedById)) {
+        return res.status(403).json({ success: false, error: "Você só pode transferir conversas atribuídas a você." });
+      }
+    }
+
+    await setAssignment(phone, clientId, targetAttendantId || null, targetAttendantName || null, assignedById, assignedByName);
+    addLog("attendance_assign", `Conversa ${phone} atribuída a ${targetAttendantName || "ninguém"}.`, { assignedByName });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Tags de conversa
+router.get("/api/attendance/tags", async (req, res) => {
+  try {
+    const { phone } = req.query || {};
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+    const tags = await getConversationTags(phone);
+    res.json({ success: true, tags });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/attendance/tags", async (req, res) => {
+  try {
+    const { phone, clientId, tag, color, attendantId, attendantName } = req.body || {};
+    if (!phone || !tag) return res.status(400).json({ success: false, error: "phone e tag obrigatórios" });
+    await addConversationTag(phone, clientId, tag, color, attendantId, attendantName);
+    addLog("attendance_tag_add", `Tag "${tag}" adicionada à conversa ${phone}.`, { attendantName });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/attendance/tags/remove", async (req, res) => {
+  try {
+    const { phone, tag } = req.body || {};
+    if (!phone || !tag) return res.status(400).json({ success: false, error: "phone e tag obrigatórios" });
+    await removeConversationTag(phone, tag);
+    addLog("attendance_tag_remove", `Tag "${tag}" removida da conversa ${phone}.`);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Comentários/notas internas de conversa
+router.get("/api/attendance/comments", async (req, res) => {
+  try {
+    const { phone } = req.query || {};
+    const limit = Number(req.query.limit || 50);
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+    const comments = await getConversationComments(phone, limit);
+    res.json({ success: true, comments });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/attendance/comments", async (req, res) => {
+  try {
+    const { phone, clientId, comment, attendantId, attendantName } = req.body || {};
+    if (!phone || !comment) return res.status(400).json({ success: false, error: "phone e comment obrigatórios" });
+    await addConversationComment(phone, clientId, comment, attendantId, attendantName);
+    addLog("attendance_comment", `Nova nota interna na conversa ${phone}.`, { attendantName });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Foto manual da conversa (avatar)
+router.get("/api/attendance/photo", async (req, res) => {
+  try {
+    const { phone } = req.query || {};
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+    const photo_url = await getConversationPhoto(phone);
+    res.json({ success: true, photo_url });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.post("/api/attendance/photo", async (req, res) => {
+  try {
+    const { phone, photoUrl, attendantId, attendantName } = req.body || {};
+    if (!phone) return res.status(400).json({ success: false, error: "phone obrigatório" });
+    if (photoUrl && !/^https?:\/\//i.test(photoUrl)) {
+      return res.status(400).json({ success: false, error: "URL de foto inválida (use http:// ou https://)." });
+    }
+    await setConversationPhoto(phone, photoUrl || null, attendantId, attendantName);
+    addLog("attendance_photo", `Foto da conversa ${phone} atualizada.`, { attendantName });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -3359,11 +3678,24 @@ router.post("/api/attendance/send-media", async (req, res) => {
     const waType = typeMap[mediaType] || "image";
     const mediaObj = { link: mediaUrl };
     if (caption && waType !== "audio") mediaObj.caption = caption;
-    const data = await sendWhatsAppRequest({
-      messaging_product: "whatsapp", to: phone, type: waType,
-      [waType]: mediaObj,
-    });
-    res.json({ success: true, messageId: data.messages?.[0]?.id || null });
+    try {
+      const data = await sendWhatsAppRequest({
+        messaging_product: "whatsapp", to: phone, type: waType,
+        [waType]: mediaObj,
+      });
+      res.json({ success: true, messageId: data.messages?.[0]?.id || null });
+    } catch (e) {
+      // Áudio gravado pelo navegador pode vir em formato não aceito pela Meta como
+      // "audio" (ex: audio/webm). Tenta reenviar como documento para não perder a mensagem.
+      if (waType === "audio") {
+        const data = await sendWhatsAppRequest({
+          messaging_product: "whatsapp", to: phone, type: "document",
+          document: { link: mediaUrl },
+        });
+        return res.json({ success: true, messageId: data.messages?.[0]?.id || null, fallback: "document" });
+      }
+      throw e;
+    }
   } catch (e) {
     res.status(500).json({ success: false, error: e.response?.data || e.message });
   }
