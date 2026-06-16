@@ -1360,16 +1360,14 @@ async function handleIncomingMessageWithAssistant(message) {
           }
         }
       }
-      // Ticks azuis + "digitando..." nativo no WhatsApp do cliente
-      await markAsRead(message.id);
+      // Ticks azuis + "digitando..." em uma única requisição (formato obrigatório da API)
       const typingStart = Date.now();
       await sendWhatsAppRequest({
         messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: message.from,
-        type: "typing_indicator",
+        status: "read",
+        message_id: message.id,
         typing_indicator: { type: "text" },
-      }).catch(() => {});
+      }).catch((e) => addLog("typing_error", "Falha ao enviar typing indicator.", e?.response?.data || e?.message));
 
       const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems, tools, tenant);
       const reply = await callGeminiDirect(geminiApiKey, systemPrompt, history, userText, audioBase64, audioMimeType);
