@@ -1360,16 +1360,22 @@ async function handleIncomingMessageWithAssistant(message) {
           }
         }
       }
+      // Marca como lido imediatamente (ticks azuis) antes de processar
+      await markAsRead(message.id);
+
       const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems, tools, tenant);
       const reply = await callGeminiDirect(geminiApiKey, systemPrompt, history, userText, audioBase64, audioMimeType);
       if (!reply) {
         addLog("assistant_skip", "Gemini nao retornou resposta.", { from: message.from });
         return;
       }
-      await saveConversationMessage(tenant.client_id, message.from, "assistant", reply, agent.id);
+      const cleanReply = formatForWhatsApp(reply);
+      await saveConversationMessage(tenant.client_id, message.from, "assistant", cleanReply, agent.id);
       const transferKeywords = safeJsonParse(agent.transfer_keywords_json) || [];
       const shouldTransfer = transferKeywords.some((kw) => (userText || "").toLowerCase().includes(kw.toLowerCase()));
-      await sendTextMessagesInSequence(message.from, chunkMessage(reply, 1000));
+      // Simula tempo de digitação humana (1-8s) antes de enviar
+      await new Promise(r => setTimeout(r, humanTypingDelay(cleanReply)));
+      await sendTextMessagesInSequence(message.from, chunkMessage(cleanReply, 1000));
 
       // ── Mídia e interatividade pós-resposta ───────────────────────
       if (tools.products?.length >= 1) {
@@ -1636,6 +1642,34 @@ function chunkMessage(text, maxLen = 1000) {
     start = end;
   }
   return chunks.filter(Boolean);
+}
+
+// ── Simula digitação humana ────────────────────────────────────────────
+async function markAsRead(messageId) {
+  if (!messageId) return;
+  return sendWhatsAppRequest({
+    messaging_product: "whatsapp",
+    status: "read",
+    message_id: messageId,
+  }).catch(() => {});
+}
+
+function humanTypingDelay(replyText) {
+  // 1-8s aleatório, levemente proporcional ao tamanho da resposta
+  const len = (replyText || "").length;
+  const base = 1000 + Math.random() * 4000; // 1-5s base
+  const extra = Math.min(3000, len * 4);     // até +3s para respostas longas
+  return Math.round(base + extra);
+}
+
+function formatForWhatsApp(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "*$1*")   // **negrito** → *negrito*
+    .replace(/#{1,6}\s*(.+)/gm, "*$1*")  // ## Título → *Título*
+    .replace(/^---+$/gm, "")              // remove linhas ---
+    .replace(/^[*-]\s+/gm, "• ")         // - item ou * item → • item
+    .replace(/\n{3,}/g, "\n\n")           // 3+ quebras → 2
+    .trim();
 }
 
 // ── CRUD: Tenants ──────────────────────────────────────────────────────
@@ -1934,11 +1968,25 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}, tenant
   const companyLinks = safeJsonParse(tenant.links_json) || [];
 
   if (personaName || personaRole || companyName) {
-    prompt += "\n\n[IDENTIDADE]\n";
-    if (personaName) prompt += `Seu nome é ${personaName}.\n`;
+    prompt += "\n\n[IDENTIDADE — REGRA ABSOLUTA]\n";
+    if (personaName) {
+      prompt += `Você É ${personaName}. Seu nome é ${personaName}.\n`;
+      prompt += `SEMPRE que perguntarem seu nome, responda "${personaName}" com naturalidade.\n`;
+      prompt += `NUNCA revele que é uma IA, robô, sistema automatizado ou assistente virtual. Você é ${personaName}.\n`;
+      prompt += `Mantenha SEMPRE o personagem "${personaName}" em absolutamente todas as mensagens.\n`;
+    }
     if (personaRole) prompt += `Sua função: ${personaRole}.\n`;
-    if (companyName) prompt += `Você atende em nome da empresa ${companyName}.\n`;
+    if (companyName) prompt += `Você trabalha em nome da empresa ${companyName}.\n`;
   }
+
+  prompt += "\n\n[FORMATAÇÃO — OBRIGATÓRIA]\n";
+  prompt += "Escreva exatamente como uma pessoa real escreveria no WhatsApp:\n";
+  prompt += "• Frases curtas e naturais, sem formalidade excessiva\n";
+  prompt += "• NUNCA use markdown: sem asteriscos duplos (**), sem #, sem ---, sem _ para itálico\n";
+  prompt += "• Para negrito use *palavra* (apenas um asterisco de cada lado, somente quando necessário)\n";
+  prompt += "• Para listas use • ou números, não -\n";
+  prompt += "• Separe parágrafos com UMA linha em branco no máximo\n";
+  prompt += "• Máximo 3-4 frases por parágrafo\n";
 
   if (companyDescription) {
     prompt += `\n[SOBRE A EMPRESA]\n${companyDescription}\n`;
