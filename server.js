@@ -1362,6 +1362,7 @@ async function handleIncomingMessageWithAssistant(message) {
       }
       // Ticks azuis + "digitando..." nativo no WhatsApp do cliente
       await markAsRead(message.id);
+      const typingStart = Date.now();
       await sendWhatsAppRequest({
         messaging_product: "whatsapp",
         recipient_type: "individual",
@@ -1380,8 +1381,11 @@ async function handleIncomingMessageWithAssistant(message) {
       await saveConversationMessage(tenant.client_id, message.from, "assistant", cleanReply, agent.id);
       const transferKeywords = safeJsonParse(agent.transfer_keywords_json) || [];
       const shouldTransfer = transferKeywords.some((kw) => (userText || "").toLowerCase().includes(kw.toLowerCase()));
-      // Aguarda delay humano (typing_indicator some automaticamente quando mensagem chega)
-      await new Promise(r => setTimeout(r, humanTypingDelay(cleanReply)));
+      // Garante mínimo de tempo visível do "digitando..." descontando o tempo já gasto com Gemini
+      const elapsed = Date.now() - typingStart;
+      const targetDelay = humanTypingDelay(cleanReply);
+      const remaining = Math.max(0, targetDelay - elapsed);
+      await new Promise(r => setTimeout(r, remaining));
       await sendTextMessagesInSequence(message.from, chunkMessage(cleanReply, 1000));
 
       // ── Mídia e interatividade pós-resposta ───────────────────────
@@ -1662,10 +1666,9 @@ async function markAsRead(messageId) {
 }
 
 function humanTypingDelay(replyText) {
-  // 1-8s aleatório, levemente proporcional ao tamanho da resposta
   const len = (replyText || "").length;
-  const base = 1000 + Math.random() * 4000; // 1-5s base
-  const extra = Math.min(3000, len * 4);     // até +3s para respostas longas
+  const base = 4000 + Math.random() * 4000; // 4-8s base (visível o suficiente)
+  const extra = Math.min(4000, len * 8);     // até +4s para respostas longas
   return Math.round(base + extra);
 }
 
