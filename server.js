@@ -1956,7 +1956,7 @@ function getRelevantKnowledge(items, messageText, limit = 5) {
 function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}, tenant = {}) {
   const basePrompt = (agent.prompt || "").trim();
   if (!basePrompt) return "";
-  let prompt = basePrompt;
+  let prompt = "";  // começa vazio; basePrompt é inserido no final para máxima prioridade
 
   // ── Identidade do agente e da empresa (sempre presente, base anti-alucinação) ──
   const personaName = agent.persona_name || "";
@@ -1978,15 +1978,6 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}, tenant
     if (personaRole) prompt += `Função: ${personaRole}.\n`;
     if (companyName) prompt += `Você representa a empresa ${companyName}.\n`;
   }
-
-  prompt += "\n\n[FORMATAÇÃO — OBRIGATÓRIA]\n";
-  prompt += "Escreva exatamente como uma pessoa real escreveria no WhatsApp:\n";
-  prompt += "• Frases curtas e naturais, sem formalidade excessiva\n";
-  prompt += "• NUNCA use markdown: sem asteriscos duplos (**), sem #, sem ---, sem _ para itálico\n";
-  prompt += "• Para negrito use *palavra* (apenas um asterisco de cada lado, somente quando necessário)\n";
-  prompt += "• Para listas use • ou números, não -\n";
-  prompt += "• Separe parágrafos com UMA linha em branco no máximo\n";
-  prompt += "• Máximo 3-4 frases por parágrafo\n";
 
   if (companyDescription) {
     prompt += `\n[SOBRE A EMPRESA]\n${companyDescription}\n`;
@@ -2139,6 +2130,17 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}, tenant
   if (tools.cart_clear_failed) {
     prompt += "\n[AVISO] Não foi possível limpar o carrinho. Peça ao cliente para tentar de novo.\n";
   }
+
+  // ── Prompt base do agente — inserido por último para ter máxima prioridade ──
+  prompt += `\n\n[MISSÃO E COMPORTAMENTO DO AGENTE — siga à risca, tem prioridade sobre tudo acima]\n${basePrompt}\n`;
+
+  prompt += "\n[FORMATAÇÃO — OBRIGATÓRIA]\n";
+  prompt += "Escreva exatamente como uma pessoa real escreveria no WhatsApp:\n";
+  prompt += "• Frases curtas e naturais\n";
+  prompt += "• NUNCA use markdown: sem **, sem #, sem ---, sem _ para itálico\n";
+  prompt += "• Para negrito use *palavra* (apenas um asterisco de cada lado)\n";
+  prompt += "• Para listas use • ou números, não -\n";
+  prompt += "• Máximo 3-4 frases por parágrafo, UMA linha em branco entre parágrafos\n";
 
   prompt += "\n[INSTRUÇÃO DE CONTEXTO]\nO histórico das últimas mensagens trocadas com este cliente aparece abaixo (do mais antigo ao mais recente). Leia tudo antes de responder para manter coerência e não repetir informações já ditas.\n";
 
