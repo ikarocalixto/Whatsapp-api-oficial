@@ -1360,21 +1360,35 @@ async function handleIncomingMessageWithAssistant(message) {
           }
         }
       }
-      // Marca como lido imediatamente (ticks azuis) antes de processar
+      // Marca como lido (ticks azuis) + reação ⌛ para feedback imediato
       await markAsRead(message.id);
+      await sendWhatsAppRequest({
+        messaging_product: "whatsapp",
+        to: message.from,
+        type: "reaction",
+        reaction: { message_id: message.id, emoji: "⌛" },
+      }).catch(() => {});
 
       const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems, tools, tenant);
       const reply = await callGeminiDirect(geminiApiKey, systemPrompt, history, userText, audioBase64, audioMimeType);
       if (!reply) {
         addLog("assistant_skip", "Gemini nao retornou resposta.", { from: message.from });
+        // Remove reação mesmo sem resposta
+        sendWhatsAppRequest({ messaging_product: "whatsapp", to: message.from, type: "reaction", reaction: { message_id: message.id, emoji: "" } }).catch(() => {});
         return;
       }
       const cleanReply = formatForWhatsApp(reply);
       await saveConversationMessage(tenant.client_id, message.from, "assistant", cleanReply, agent.id);
       const transferKeywords = safeJsonParse(agent.transfer_keywords_json) || [];
       const shouldTransfer = transferKeywords.some((kw) => (userText || "").toLowerCase().includes(kw.toLowerCase()));
-      // Simula tempo de digitação humana (1-8s) antes de enviar
+      // Simula tempo de digitação humana, remove ⌛ e envia resposta
       await new Promise(r => setTimeout(r, humanTypingDelay(cleanReply)));
+      await sendWhatsAppRequest({
+        messaging_product: "whatsapp",
+        to: message.from,
+        type: "reaction",
+        reaction: { message_id: message.id, emoji: "" },
+      }).catch(() => {});
       await sendTextMessagesInSequence(message.from, chunkMessage(cleanReply, 1000));
 
       // ── Mídia e interatividade pós-resposta ───────────────────────
