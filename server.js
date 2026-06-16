@@ -23,7 +23,7 @@ dotenv.config(resolvedEnvPath ? { path: resolvedEnvPath } : undefined);
 
 const app = express();
 const port = process.env.WHATSAPP_OFFICIAL_PORT || 3010;
-const apiVersion = process.env.WHATSAPP_API_VERSION || "v17.0";
+const apiVersion = process.env.WHATSAPP_API_VERSION || "v22.0";
 const baseUrl = `https://graph.facebook.com/${apiVersion}`;
 const appBasePath = normalizeBasePath(process.env.WHATSAPP_OFFICIAL_BASE_PATH || "/");
 
