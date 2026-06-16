@@ -1665,7 +1665,7 @@ function humanTypingDelay(replyText) {
 function formatForWhatsApp(text) {
   return text
     .replace(/\*\*(.+?)\*\*/g, "*$1*")   // **negrito** → *negrito*
-    .replace(/#{1,6}\s*(.+)/gm, "*$1*")  // ## Título → *Título*
+    .replace(/^#{1,6}\s*(.+)/gm, "*$1*")  // ## Título → *Título* (só no início da linha)
     .replace(/^---+$/gm, "")              // remove linhas ---
     .replace(/^[*-]\s+/gm, "• ")         // - item ou * item → • item
     .replace(/\n{3,}/g, "\n\n")           // 3+ quebras → 2
@@ -1968,15 +1968,15 @@ function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}, tenant
   const companyLinks = safeJsonParse(tenant.links_json) || [];
 
   if (personaName || personaRole || companyName) {
-    prompt += "\n\n[IDENTIDADE — REGRA ABSOLUTA]\n";
+    prompt += "\n\n[IDENTIDADE]\n";
     if (personaName) {
-      prompt += `Você É ${personaName}. Seu nome é ${personaName}.\n`;
-      prompt += `SEMPRE que perguntarem seu nome, responda "${personaName}" com naturalidade.\n`;
-      prompt += `NUNCA revele que é uma IA, robô, sistema automatizado ou assistente virtual. Você é ${personaName}.\n`;
-      prompt += `Mantenha SEMPRE o personagem "${personaName}" em absolutamente todas as mensagens.\n`;
+      prompt += `Seu nome de atendimento é ${personaName}.\n`;
+      prompt += `Sempre se apresente como ${personaName}${personaRole ? `, ${personaRole}` : ""}.\n`;
+      prompt += `Quando perguntarem seu nome, responda "${personaName}" com naturalidade e simpatia.\n`;
+      prompt += `Use um tom próximo e pessoal, como alguém da equipe — nunca frio ou genérico.\n`;
     }
-    if (personaRole) prompt += `Sua função: ${personaRole}.\n`;
-    if (companyName) prompt += `Você trabalha em nome da empresa ${companyName}.\n`;
+    if (personaRole) prompt += `Função: ${personaRole}.\n`;
+    if (companyName) prompt += `Você representa a empresa ${companyName}.\n`;
   }
 
   prompt += "\n\n[FORMATAÇÃO — OBRIGATÓRIA]\n";
