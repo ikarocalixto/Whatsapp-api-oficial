@@ -524,7 +524,31 @@ async function ensurePersistenceTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
+  // ── Migração: identidade da empresa (tenant) e do agente ────────────────
+  await ensureColumns(pool, tenantsTable, {
+    company_name: "VARCHAR(191) DEFAULT NULL",
+    company_description: "TEXT DEFAULT NULL",
+    site_url: "VARCHAR(255) DEFAULT NULL",
+    catalog_url: "VARCHAR(255) DEFAULT NULL",
+    links_json: "LONGTEXT DEFAULT NULL",
+  });
+  await ensureColumns(pool, agentsTable, {
+    persona_name: "VARCHAR(100) DEFAULT NULL",
+    persona_role: "VARCHAR(150) DEFAULT NULL",
+  });
+
   return true;
+}
+
+// ── Migração: adiciona colunas que ainda não existem na tabela ──────────
+async function ensureColumns(pool, table, columns) {
+  const [existing] = await pool.query(`SHOW COLUMNS FROM \`${table}\``);
+  const existingNames = new Set(existing.map((c) => c.Field));
+  for (const [column, definition] of Object.entries(columns)) {
+    if (!existingNames.has(column)) {
+      await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    }
+  }
 }
 
 async function persistRuntimeLog(type, message, details = null) {
@@ -1336,7 +1360,7 @@ async function handleIncomingMessageWithAssistant(message) {
           }
         }
       }
-      const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems, tools);
+      const systemPrompt = buildPersonalizedPrompt(agent, leadContext, knowledgeItems, tools, tenant);
       const reply = await callGeminiDirect(geminiApiKey, systemPrompt, history, userText, audioBase64, audioMimeType);
       if (!reply) {
         addLog("assistant_skip", "Gemini nao retornou resposta.", { from: message.from });
@@ -1622,14 +1646,17 @@ async function getTenants() {
   return rows;
 }
 
-async function upsertTenant({ clientId, wpUrl, apiKey, active = 1 }) {
+async function upsertTenant({ clientId, wpUrl, apiKey, active = 1, companyName, companyDescription, siteUrl, catalogUrl, links }) {
   const pool = await getDbPool();
   if (!pool) throw new Error("DB unavailable");
+  const linksJson = links ? JSON.stringify(links) : null;
   await pool.execute(
-    `INSERT INTO \`${getTableName("tenants")}\` (client_id, wp_url, api_key, active)
-     VALUES (?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE wp_url = VALUES(wp_url), api_key = VALUES(api_key), active = VALUES(active)`,
-    [clientId, wpUrl, apiKey, active ? 1 : 0]
+    `INSERT INTO \`${getTableName("tenants")}\` (client_id, wp_url, api_key, active, company_name, company_description, site_url, catalog_url, links_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE wp_url = VALUES(wp_url), api_key = VALUES(api_key), active = VALUES(active),
+       company_name = VALUES(company_name), company_description = VALUES(company_description),
+       site_url = VALUES(site_url), catalog_url = VALUES(catalog_url), links_json = VALUES(links_json)`,
+    [clientId, wpUrl, apiKey, active ? 1 : 0, companyName || null, companyDescription || null, siteUrl || null, catalogUrl || null, linksJson]
   );
 }
 
@@ -1660,20 +1687,22 @@ async function getAgents() {
 async function upsertAgent(data) {
   const pool = await getDbPool();
   if (!pool) throw new Error("DB unavailable");
-  const { id, name, prompt, keywords, assignedDomains, transferKeywords, transferNumber, icon, description, active } = data;
+  const { id, name, prompt, keywords, assignedDomains, transferKeywords, transferNumber, icon, description, active, personaName, personaRole } = data;
   const kJson  = keywords ? JSON.stringify(keywords) : null;
   const adJson = assignedDomains ? JSON.stringify(assignedDomains) : null;
   const tkJson = transferKeywords ? JSON.stringify(transferKeywords) : null;
   const activeVal = active !== false ? 1 : 0;
   const promptVal = prompt || "";
+  const personaNameVal = personaName || null;
+  const personaRoleVal = personaRole || null;
 
   if (id) {
     await pool.execute(
       `UPDATE \`${getTableName("agents")}\`
        SET name=?, prompt=?, keywords_json=?, assigned_domains_json=?, transfer_keywords_json=?,
-           transfer_number=?, icon=?, description=?, active=?
+           transfer_number=?, icon=?, description=?, active=?, persona_name=?, persona_role=?
        WHERE id=?`,
-      [name, promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, id]
+      [name, promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, personaNameVal, personaRoleVal, id]
     );
     return;
   }
@@ -1688,16 +1717,16 @@ async function upsertAgent(data) {
     await pool.execute(
       `UPDATE \`${getTableName("agents")}\`
        SET prompt=?, keywords_json=?, assigned_domains_json=?, transfer_keywords_json=?,
-           transfer_number=?, icon=?, description=?, active=?
+           transfer_number=?, icon=?, description=?, active=?, persona_name=?, persona_role=?
        WHERE id=?`,
-      [promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, existing[0].id]
+      [promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, personaNameVal, personaRoleVal, existing[0].id]
     );
   } else {
     await pool.execute(
       `INSERT INTO \`${getTableName("agents")}\`
-         (name, prompt, keywords_json, assigned_domains_json, transfer_keywords_json, transfer_number, icon, description, active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [name, promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal]
+         (name, prompt, keywords_json, assigned_domains_json, transfer_keywords_json, transfer_number, icon, description, active, persona_name, persona_role)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name, promptVal, kJson, adJson, tkJson, transferNumber || null, icon || "🤖", description || null, activeVal, personaNameVal, personaRoleVal]
     );
   }
 }
@@ -1890,10 +1919,46 @@ function getRelevantKnowledge(items, messageText, limit = 5) {
 }
 
 // ── IA: Prompt personalizado ───────────────────────────────────────────
-function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}) {
+function buildPersonalizedPrompt(agent, lead, knowledgeItems, tools = {}, tenant = {}) {
   const basePrompt = (agent.prompt || "").trim();
   if (!basePrompt) return "";
   let prompt = basePrompt;
+
+  // ── Identidade do agente e da empresa (sempre presente, base anti-alucinação) ──
+  const personaName = agent.persona_name || "";
+  const personaRole = agent.persona_role || "";
+  const companyName = tenant.company_name || "";
+  const companyDescription = tenant.company_description || "";
+  const siteUrl = tenant.site_url || "";
+  const catalogUrl = tenant.catalog_url || "";
+  const companyLinks = safeJsonParse(tenant.links_json) || [];
+
+  if (personaName || personaRole || companyName) {
+    prompt += "\n\n[IDENTIDADE]\n";
+    if (personaName) prompt += `Seu nome é ${personaName}.\n`;
+    if (personaRole) prompt += `Sua função: ${personaRole}.\n`;
+    if (companyName) prompt += `Você atende em nome da empresa ${companyName}.\n`;
+  }
+
+  if (companyDescription) {
+    prompt += `\n[SOBRE A EMPRESA]\n${companyDescription}\n`;
+  }
+
+  const officialLinks = [];
+  if (siteUrl) officialLinks.push({ label: "Site", url: siteUrl });
+  if (catalogUrl) officialLinks.push({ label: "Catálogo/Loja", url: catalogUrl });
+  if (Array.isArray(companyLinks)) {
+    companyLinks.forEach((l) => {
+      if (l && l.url) officialLinks.push({ label: l.label || "Link", url: l.url });
+    });
+  }
+
+  if (officialLinks.length > 0) {
+    prompt += "\n[LINKS OFICIAIS — use exclusivamente estes links quando precisar enviar um link]\n";
+    officialLinks.forEach((l) => { prompt += `• ${l.label}: ${l.url}\n`; });
+  }
+
+  prompt += "\n[REGRA DE LINKS — OBRIGATÓRIA]\nNUNCA invente, deduza ou complete uma URL. Use SOMENTE links que aparecem literalmente neste prompt (em LINKS OFICIAIS, PRODUTOS ENCONTRADOS ou PEDIDOS DO CLIENTE). Se o cliente pedir um link que não está disponível aqui, ofereça um dos LINKS OFICIAIS acima ou diga que vai verificar com a equipe e retornar — nunca crie uma URL nova.\n";
 
   // ── Perfil do lead (dados do WordPress) ──
   if (lead && lead.found) {
@@ -2051,7 +2116,7 @@ async function callGeminiDirect(apiKey, systemPrompt, history, userMessage, audi
   contents.push({ role: "user", parts: userParts });
   const geminiBody = {
     contents,
-    generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+    generationConfig: { temperature: 0.4, maxOutputTokens: 1024 },
   };
   if (systemPrompt) {
     geminiBody.systemInstruction = { parts: [{ text: systemPrompt }] };
@@ -3288,9 +3353,9 @@ router.get("/api/tenants", async (_req, res) => {
 
 router.post("/api/tenants", async (req, res) => {
   try {
-    const { clientId, wpUrl, apiKey, active } = req.body || {};
+    const { clientId, wpUrl, apiKey, active, companyName, companyDescription, siteUrl, catalogUrl, links } = req.body || {};
     if (!clientId || !wpUrl || !apiKey) return res.status(400).json({ success: false, error: "clientId, wpUrl e apiKey são obrigatórios." });
-    await upsertTenant({ clientId, wpUrl, apiKey, active });
+    await upsertTenant({ clientId, wpUrl, apiKey, active, companyName, companyDescription, siteUrl, catalogUrl, links });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
