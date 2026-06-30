@@ -5,6 +5,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const path = require("path");
 const fs = require("fs");
+const { AsyncLocalStorage } = require("async_hooks");
 let mysql = null;
 
 try {
@@ -14,9 +15,10 @@ try {
 }
 
 const envCandidates = [
+  process.env.WHATSAPP_ENV_FILE ? path.resolve(process.env.WHATSAPP_ENV_FILE) : null,
   path.resolve(__dirname, ".env"),
   path.resolve(__dirname, "../.env"),
-];
+].filter(Boolean);
 const resolvedEnvPath = envCandidates.find((candidate) => fs.existsSync(candidate));
 
 dotenv.config(resolvedEnvPath ? { path: resolvedEnvPath } : undefined);
@@ -32,6 +34,27 @@ const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 const verifyToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "troque-esse-token";
 const appSecret = process.env.WHATSAPP_APP_SECRET;
 const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+
+// ── Multi-numero: credenciais por loja (tenant) via AsyncLocalStorage ────
+// Cada loja pode ter seu proprio numero/token/app secret na Meta. As funcoes
+// de envio leem a credencial "atual" deste contexto; fora de um contexto
+// definido (ex.: startup, rotas sem tenant), caem nas constantes globais
+// acima — ou seja, uma loja sem credenciais proprias cadastradas continua
+// funcionando exatamente como antes.
+const waContext = new AsyncLocalStorage();
+
+function currentWaCredentials() {
+  return waContext.getStore() || { phoneNumberId, accessToken, appSecret, businessAccountId };
+}
+
+function waCredentialsForTenant(tenant) {
+  return {
+    phoneNumberId: tenant?.whatsapp_phone_number_id || phoneNumberId,
+    accessToken: tenant?.whatsapp_access_token || accessToken,
+    appSecret: tenant?.whatsapp_app_secret || appSecret,
+    businessAccountId: tenant?.whatsapp_business_account_id || businessAccountId,
+  };
+}
 const mysqlHost = process.env.WHATSAPP_MYSQL_HOST || process.env.MYSQL_HOST || "";
 const mysqlPort = Number(process.env.WHATSAPP_MYSQL_PORT || process.env.MYSQL_PORT || 3306);
 const mysqlDatabase = process.env.WHATSAPP_MYSQL_DATABASE || process.env.MYSQL_DATABASE || "";
@@ -532,6 +555,13 @@ async function ensurePersistenceTables() {
     catalog_url: "VARCHAR(255) DEFAULT NULL",
     links_json: "LONGTEXT DEFAULT NULL",
   });
+  // ── Migração: credenciais WhatsApp Cloud API por tenant (multi-numero) ──
+  await ensureColumns(pool, tenantsTable, {
+    whatsapp_phone_number_id: "VARCHAR(100) DEFAULT NULL",
+    whatsapp_access_token: "VARCHAR(512) DEFAULT NULL",
+    whatsapp_app_secret: "VARCHAR(255) DEFAULT NULL",
+    whatsapp_business_account_id: "VARCHAR(100) DEFAULT NULL",
+  });
   await ensureColumns(pool, agentsTable, {
     persona_name: "VARCHAR(100) DEFAULT NULL",
     persona_role: "VARCHAR(150) DEFAULT NULL",
@@ -892,7 +922,9 @@ async function processQueueJobs(limit = 20) {
         },
       };
 
-      const data = await sendWhatsAppRequest(payload);
+      const jobClientId = await getClientIdForPhone(leadPayload.phone);
+      const jobTenant = jobClientId ? await getTenantById(jobClientId) : null;
+      const data = await waContext.run(waCredentialsForTenant(jobTenant), () => sendWhatsAppRequest(payload));
       const messageId = data.messages?.[0]?.id || null;
       const acceptedStatus = data.messages?.[0]?.message_status || "accepted";
 
@@ -956,23 +988,25 @@ function startQueueWorker() {
 
 function validateConfig() {
   const missing = [];
+  const creds = currentWaCredentials();
 
-  if (!phoneNumberId) missing.push("WHATSAPP_PHONE_NUMBER_ID");
-  if (!accessToken) missing.push("WHATSAPP_ACCESS_TOKEN");
+  if (!creds.phoneNumberId) missing.push("WHATSAPP_PHONE_NUMBER_ID");
+  if (!creds.accessToken) missing.push("WHATSAPP_ACCESS_TOKEN");
 
   if (missing.length) {
     throw new Error(`Variaveis ausentes no .env: ${missing.join(", ")}`);
   }
 }
 
-function verifyMetaSignature(req) {
-  if (!appSecret) return true;
+function verifyMetaSignature(req, secretOverride) {
+  const secret = secretOverride || appSecret;
+  if (!secret) return true;
 
   const signature = req.header("x-hub-signature-256");
   if (!signature || !req.rawBody) return false;
 
   const expected = `sha256=${crypto
-    .createHmac("sha256", appSecret)
+    .createHmac("sha256", secret)
     .update(req.rawBody)
     .digest("hex")}`;
 
@@ -995,6 +1029,7 @@ function extractWebhookMessages(body) {
     const changes = Array.isArray(entry.changes) ? entry.changes : [];
     for (const change of changes) {
       const value = change.value || {};
+      const receivingPhoneNumberId = value.metadata?.phone_number_id || null;
       const contacts = Array.isArray(value.contacts) ? value.contacts : [];
       const contactNames = new Map(
         contacts.map((contact) => [String(contact.wa_id || ""), contact.profile?.name || null])
@@ -1002,6 +1037,7 @@ function extractWebhookMessages(body) {
       if (Array.isArray(value.messages)) {
         for (const message of value.messages) {
           messages.push({
+            receivingPhoneNumberId,
             from: message.from,
             id: message.id,
             timestamp: message.timestamp,
@@ -1033,6 +1069,7 @@ function extractWebhookMessages(body) {
       if (Array.isArray(value.statuses)) {
         for (const status of value.statuses) {
           statuses.push({
+            receivingPhoneNumberId,
             id: status.id,
             status: status.status,
             recipientId: status.recipient_id,
@@ -1058,9 +1095,10 @@ function extractWebhookMessages(body) {
 }
 
 async function sendWhatsAppRequest(payload) {
-  const response = await axios.post(`${baseUrl}/${phoneNumberId}/messages`, payload, {
+  const creds = currentWaCredentials();
+  const response = await axios.post(`${baseUrl}/${creds.phoneNumberId}/messages`, payload, {
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${creds.accessToken}`,
       "Content-Type": "application/json",
     },
   });
@@ -1069,9 +1107,10 @@ async function sendWhatsAppRequest(payload) {
 }
 
 async function downloadWhatsAppMedia(mediaId) {
+  const creds = currentWaCredentials();
   const metaResponse = await axios.get(`${baseUrl}/${mediaId}`, {
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${creds.accessToken}`,
     },
   });
 
@@ -1083,7 +1122,7 @@ async function downloadWhatsAppMedia(mediaId) {
   const mediaResponse = await axios.get(downloadUrl, {
     responseType: "arraybuffer",
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${creds.accessToken}`,
     },
   });
 
@@ -1191,7 +1230,8 @@ async function handleIncomingMessageWithAssistant(message) {
   // ── MODO 1: IA nativa na VPS (Gemini) ────────────────────────────────
   if (geminiApiKey && isMySqlQueueEnabled()) {
     try {
-      const tenant = await resolveTenantForPhone(message.from);
+      const tenant = (message.receivingPhoneNumberId && await getTenantByWhatsAppNumber(message.receivingPhoneNumberId))
+        || await resolveTenantForPhone(message.from);
       if (!tenant) {
         addLog("assistant_skip", "Nenhum tenant encontrado para o numero. Tentando fallback WP.", { from: message.from });
         return _handleWithWordPress(message);
@@ -1501,9 +1541,10 @@ async function handleIncomingMessages(messages) {
 }
 
 async function fetchPhoneNumberMetadata() {
-  const response = await axios.get(`${baseUrl}/${phoneNumberId}`, {
+  const creds = currentWaCredentials();
+  const response = await axios.get(`${baseUrl}/${creds.phoneNumberId}`, {
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${creds.accessToken}`,
     },
     params: {
       fields: "id,display_phone_number,verified_name",
@@ -1515,7 +1556,8 @@ async function fetchPhoneNumberMetadata() {
 
 async function resolveBusinessAccountId(requestWabaId) {
   if (requestWabaId) return requestWabaId;
-  if (businessAccountId) return businessAccountId;
+  const creds = currentWaCredentials();
+  if (creds.businessAccountId) return creds.businessAccountId;
   return null;
 }
 
@@ -1607,7 +1649,7 @@ async function createMessageTemplate({
     },
     {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${currentWaCredentials().accessToken}`,
         "Content-Type": "application/json",
       },
     }
@@ -1619,7 +1661,7 @@ async function createMessageTemplate({
 async function listMessageTemplates(wabaId) {
   const response = await axios.get(`${baseUrl}/${wabaId}/message_templates`, {
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${currentWaCredentials().accessToken}`,
     },
     params: {
       limit: 100,
@@ -1688,17 +1730,26 @@ async function getTenants() {
   return rows;
 }
 
-async function upsertTenant({ clientId, wpUrl, apiKey, active = 1, companyName, companyDescription, siteUrl, catalogUrl, links }) {
+async function upsertTenant({
+  clientId, wpUrl, apiKey, active = 1, companyName, companyDescription, siteUrl, catalogUrl, links,
+  whatsappPhoneNumberId, whatsappAccessToken, whatsappAppSecret, whatsappBusinessAccountId,
+}) {
   const pool = await getDbPool();
   if (!pool) throw new Error("DB unavailable");
   const linksJson = links ? JSON.stringify(links) : null;
   await pool.execute(
-    `INSERT INTO \`${getTableName("tenants")}\` (client_id, wp_url, api_key, active, company_name, company_description, site_url, catalog_url, links_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO \`${getTableName("tenants")}\` (client_id, wp_url, api_key, active, company_name, company_description, site_url, catalog_url, links_json,
+       whatsapp_phone_number_id, whatsapp_access_token, whatsapp_app_secret, whatsapp_business_account_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE wp_url = VALUES(wp_url), api_key = VALUES(api_key), active = VALUES(active),
        company_name = VALUES(company_name), company_description = VALUES(company_description),
-       site_url = VALUES(site_url), catalog_url = VALUES(catalog_url), links_json = VALUES(links_json)`,
-    [clientId, wpUrl, apiKey, active ? 1 : 0, companyName || null, companyDescription || null, siteUrl || null, catalogUrl || null, linksJson]
+       site_url = VALUES(site_url), catalog_url = VALUES(catalog_url), links_json = VALUES(links_json),
+       whatsapp_phone_number_id = VALUES(whatsapp_phone_number_id), whatsapp_access_token = VALUES(whatsapp_access_token),
+       whatsapp_app_secret = VALUES(whatsapp_app_secret), whatsapp_business_account_id = VALUES(whatsapp_business_account_id)`,
+    [
+      clientId, wpUrl, apiKey, active ? 1 : 0, companyName || null, companyDescription || null, siteUrl || null, catalogUrl || null, linksJson,
+      whatsappPhoneNumberId || null, whatsappAccessToken || null, whatsappAppSecret || null, whatsappBusinessAccountId || null,
+    ]
   );
 }
 
@@ -1714,6 +1765,17 @@ async function getTenantById(clientId) {
   const [rows] = await pool.execute(
     `SELECT * FROM \`${getTableName("tenants")}\` WHERE client_id = ? AND active = 1`,
     [clientId]
+  );
+  return rows[0] || null;
+}
+
+// ── Identifica o tenant dono do numero oficial que recebeu a mensagem ────
+async function getTenantByWhatsAppNumber(receivingPhoneNumberId) {
+  const pool = await getDbPool();
+  if (!pool || !receivingPhoneNumberId) return null;
+  const [rows] = await pool.execute(
+    `SELECT * FROM \`${getTableName("tenants")}\` WHERE whatsapp_phone_number_id = ? AND active = 1 LIMIT 1`,
+    [receivingPhoneNumberId]
   );
   return rows[0] || null;
 }
@@ -2919,7 +2981,8 @@ async function sendCampaignBatch(campaignId, limit = 50) {
           text: { body: campaign.message_text, preview_url: false },
         };
       } else { continue; }
-      const data = await sendWhatsAppRequest(payload);
+      const recipientTenant = recipient.client_id ? await getTenantById(recipient.client_id) : null;
+      const data = await waContext.run(waCredentialsForTenant(recipientTenant), () => sendWhatsAppRequest(payload));
       const messageId = data.messages?.[0]?.id || null;
       await pool.execute(
         `UPDATE \`${recipientsTable}\` SET status = 'sent', message_id = ?, sent_at = ? WHERE id = ?`,
@@ -3046,8 +3109,15 @@ router.get("/webhook", (req, res) => {
   });
 });
 
-router.post("/webhook", (req, res) => {
-  if (!verifyMetaSignature(req)) {
+router.post("/webhook", async (req, res) => {
+  // Uma request HTTP da Meta pertence a um unico App/numero — descobre qual
+  // antes de validar a assinatura, pra usar o app secret do tenant certo
+  // (cada loja pode estar num App separado na Meta, com secret proprio).
+  const firstValue = req.body?.entry?.[0]?.changes?.[0]?.value || {};
+  const incomingPhoneNumberId = firstValue.metadata?.phone_number_id || null;
+  const tenant = await getTenantByWhatsAppNumber(incomingPhoneNumberId).catch(() => null);
+
+  if (!verifyMetaSignature(req, tenant?.whatsapp_app_secret)) {
     addLog("error", "Assinatura do webhook invalida.");
     return res.status(401).json({
       success: false,
@@ -3086,7 +3156,9 @@ router.post("/webhook", (req, res) => {
   res.sendStatus(200);
 
   if (messages.length) {
-    void handleIncomingMessages(messages);
+    waContext.run(waCredentialsForTenant(tenant), () => {
+      void handleIncomingMessages(messages);
+    });
   }
 
   return;
@@ -3096,7 +3168,7 @@ router.post("/send-text", async (req, res) => {
   try {
     validateConfig();
 
-    const { to, body, preview_url } = req.body;
+    const { to, body, preview_url, tenantId } = req.body;
     if (!to || !body) {
       return res.status(400).json({
         success: false,
@@ -3114,7 +3186,9 @@ router.post("/send-text", async (req, res) => {
       },
     };
 
-    const data = await sendWhatsAppRequest(payload);
+    const resolvedCid = tenantId || (await getClientIdForPhone(to));
+    const tenant = resolvedCid ? await getTenantById(resolvedCid) : null;
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => sendWhatsAppRequest(payload));
     const messageId = data.messages?.[0]?.id || null;
     const acceptedStatus = data.messages?.[0]?.message_status || "accepted";
 
@@ -3144,7 +3218,7 @@ router.post("/send-template", async (req, res) => {
   try {
     validateConfig();
 
-    const { to, templateName, languageCode = "pt_BR", bodyParameters = [] } = req.body;
+    const { to, templateName, languageCode = "pt_BR", bodyParameters = [], tenantId } = req.body;
 
     if (!to || !templateName) {
       return res.status(400).json({
@@ -3178,7 +3252,9 @@ router.post("/send-template", async (req, res) => {
       },
     };
 
-    const data = await sendWhatsAppRequest(payload);
+    const resolvedCid = tenantId || (await getClientIdForPhone(to));
+    const tenant = resolvedCid ? await getTenantById(resolvedCid) : null;
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => sendWhatsAppRequest(payload));
     const messageId = data.messages?.[0]?.id || null;
     const acceptedStatus = data.messages?.[0]?.message_status || "accepted";
 
@@ -3198,10 +3274,7 @@ router.post("/send-template", async (req, res) => {
     try {
       const pool = await getDbPool();
       if (pool) {
-        const [mapped] = await pool.execute(
-          `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [to]
-        );
-        const cid = mapped[0]?.client_id || "automation";
+        const cid = resolvedCid || "automation";
         await saveConversationMessage(cid, to, "human", `📨 [Automação] Modelo enviado: ${templateName}`, null);
       }
     } catch (_) { /* não bloquear o envio se o log falhar */ }
@@ -3221,7 +3294,8 @@ router.get("/message-templates", async (req, res) => {
   try {
     validateConfig();
 
-    const wabaId = await resolveBusinessAccountId(req.query.wabaId);
+    const tenant = req.query.tenantId ? await getTenantById(req.query.tenantId) : null;
+    const wabaId = await waContext.run(waCredentialsForTenant(tenant), () => resolveBusinessAccountId(req.query.wabaId));
     if (!wabaId) {
       return res.status(400).json({
         success: false,
@@ -3229,7 +3303,7 @@ router.get("/message-templates", async (req, res) => {
       });
     }
 
-    const data = await listMessageTemplates(wabaId);
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => listMessageTemplates(wabaId));
     addLog("template_list", "Lista de templates consultada.", {
       wabaId,
       total: Array.isArray(data.data) ? data.data.length : 0,
@@ -3260,9 +3334,11 @@ router.post("/submit-template", async (req, res) => {
       headerText = "",
       headerExampleHandle = "",
       allowCategoryChange = true,
+      tenantId,
     } = req.body;
 
-    const wabaId = await resolveBusinessAccountId(requestWabaId);
+    const tenant = tenantId ? await getTenantById(tenantId) : null;
+    const wabaId = await waContext.run(waCredentialsForTenant(tenant), () => resolveBusinessAccountId(requestWabaId));
     if (!wabaId) {
       return res.status(400).json({
         success: false,
@@ -3281,7 +3357,7 @@ router.post("/submit-template", async (req, res) => {
       ? bodyExamples.map((item) => String(item).trim()).filter(Boolean)
       : [];
 
-    const data = await createMessageTemplate({
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => createMessageTemplate({
       wabaId,
       name,
       category,
@@ -3293,7 +3369,7 @@ router.post("/submit-template", async (req, res) => {
       headerText,
       headerExampleHandle,
       allowCategoryChange,
-    });
+    }));
 
     addLog("template_submission", `Template ${name} enviado para aprovacao.`, {
       wabaId,
@@ -3411,9 +3487,15 @@ router.get("/api/tenants", async (_req, res) => {
 
 router.post("/api/tenants", async (req, res) => {
   try {
-    const { clientId, wpUrl, apiKey, active, companyName, companyDescription, siteUrl, catalogUrl, links } = req.body || {};
+    const {
+      clientId, wpUrl, apiKey, active, companyName, companyDescription, siteUrl, catalogUrl, links,
+      whatsappPhoneNumberId, whatsappAccessToken, whatsappAppSecret, whatsappBusinessAccountId,
+    } = req.body || {};
     if (!clientId || !wpUrl || !apiKey) return res.status(400).json({ success: false, error: "clientId, wpUrl e apiKey são obrigatórios." });
-    await upsertTenant({ clientId, wpUrl, apiKey, active, companyName, companyDescription, siteUrl, catalogUrl, links });
+    await upsertTenant({
+      clientId, wpUrl, apiKey, active, companyName, companyDescription, siteUrl, catalogUrl, links,
+      whatsappPhoneNumberId, whatsappAccessToken, whatsappAppSecret, whatsappBusinessAccountId,
+    });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -3810,20 +3892,19 @@ router.post("/api/attendance/photo", async (req, res) => {
 router.post("/api/attendance/send-text", async (req, res) => {
   try {
     validateConfig();
-    const { phone, text } = req.body || {};
+    const { phone, text, tenantId } = req.body || {};
     if (!phone || !text) return res.status(400).json({ success: false, error: "phone e text obrigatórios" });
-    const data = await sendWhatsAppRequest({
+    const resolvedCid = tenantId || (await getClientIdForPhone(phone));
+    const tenant = resolvedCid ? await getTenantById(resolvedCid) : null;
+    const cid = resolvedCid || "manual";
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => sendWhatsAppRequest({
       messaging_product: "whatsapp", to: phone, type: "text",
       text: { body: text, preview_url: false },
-    });
+    }));
     const messageId = data.messages?.[0]?.id || null;
     // Salvar no histórico como "human"
     const pool = await getDbPool();
     if (pool) {
-      const [mapped] = await pool.execute(
-        `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
-      );
-      const cid = mapped[0]?.client_id || "manual";
       await pool.execute(
         `INSERT INTO \`${getTableName("conversations")}\` (client_id, phone, role, message, created_at) VALUES (?, ?, 'human', ?, ?)`,
         [cid, phone, text, nowMysql()]
@@ -3842,29 +3923,33 @@ router.post("/api/attendance/send-text", async (req, res) => {
 router.post("/api/attendance/send-media", async (req, res) => {
   try {
     validateConfig();
-    const { phone, mediaUrl, mediaType = "image", caption = "", filename = "" } = req.body || {};
+    const { phone, mediaUrl, mediaType = "image", caption = "", filename = "", tenantId } = req.body || {};
     if (!phone || !mediaUrl) return res.status(400).json({ success: false, error: "phone e mediaUrl obrigatórios" });
     const typeMap = { image: "image", video: "video", audio: "audio", document: "document" };
     const waType = typeMap[mediaType] || "image";
     const mediaObj = { link: mediaUrl };
     if (caption && waType !== "audio") mediaObj.caption = caption;
 
+    const resolvedCid = tenantId || (await getClientIdForPhone(phone));
+    const tenant = resolvedCid ? await getTenantById(resolvedCid) : null;
+    const cid = resolvedCid || "manual";
+
     let messageId = null;
     let fallback = null;
     try {
-      const data = await sendWhatsAppRequest({
+      const data = await waContext.run(waCredentialsForTenant(tenant), () => sendWhatsAppRequest({
         messaging_product: "whatsapp", to: phone, type: waType,
         [waType]: mediaObj,
-      });
+      }));
       messageId = data.messages?.[0]?.id || null;
     } catch (e) {
       // Áudio gravado pelo navegador pode vir em formato não aceito pela Meta como
       // "audio" (ex: audio/webm). Tenta reenviar como documento para não perder a mensagem.
       if (waType === "audio") {
-        const data = await sendWhatsAppRequest({
+        const data = await waContext.run(waCredentialsForTenant(tenant), () => sendWhatsAppRequest({
           messaging_product: "whatsapp", to: phone, type: "document",
           document: { link: mediaUrl },
-        });
+        }));
         messageId = data.messages?.[0]?.id || null;
         fallback = "document";
       } else {
@@ -3875,10 +3960,6 @@ router.post("/api/attendance/send-media", async (req, res) => {
     // Salvar no histórico como "human", com marcador de mídia
     const pool = await getDbPool();
     if (pool) {
-      const [mapped] = await pool.execute(
-        `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
-      );
-      const cid = mapped[0]?.client_id || "manual";
       const marker = JSON.stringify({
         kind: "media",
         mediaType,
@@ -3921,7 +4002,7 @@ router.get("/api/attendance/media/:mediaId", async (req, res) => {
 router.post("/api/attendance/send-template", async (req, res) => {
   try {
     validateConfig();
-    const { phone, templateName, languageCode = "pt_BR", bodyParameters = [] } = req.body || {};
+    const { phone, templateName, languageCode = "pt_BR", bodyParameters = [], tenantId } = req.body || {};
     if (!phone || !templateName) return res.status(400).json({ success: false, error: "phone e templateName obrigatórios" });
 
     const components = [];
@@ -3932,18 +4013,18 @@ router.post("/api/attendance/send-template", async (req, res) => {
       });
     }
 
-    const data = await sendWhatsAppRequest({
+    const resolvedCid = tenantId || (await getClientIdForPhone(phone));
+    const tenant = resolvedCid ? await getTenantById(resolvedCid) : null;
+    const cid = resolvedCid || "manual";
+
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => sendWhatsAppRequest({
       messaging_product: "whatsapp", to: phone, type: "template",
       template: { name: templateName, language: { code: languageCode }, ...(components.length ? { components } : {}) },
-    });
+    }));
     const messageId = data.messages?.[0]?.id || null;
 
     const pool = await getDbPool();
     if (pool) {
-      const [mapped] = await pool.execute(
-        `SELECT client_id FROM \`${getTableName("phone_tenant_map")}\` WHERE phone = ?`, [phone]
-      );
-      const cid = mapped[0]?.client_id || "manual";
       await pool.execute(
         `INSERT INTO \`${getTableName("conversations")}\` (client_id, phone, role, message, created_at) VALUES (?, ?, 'human', ?, ?)`,
         [cid, phone, `📨 Modelo enviado: ${templateName}`, nowMysql()]
