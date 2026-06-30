@@ -562,6 +562,10 @@ async function ensurePersistenceTables() {
     whatsapp_app_secret: "VARCHAR(255) DEFAULT NULL",
     whatsapp_business_account_id: "VARCHAR(100) DEFAULT NULL",
   });
+  // ── Migração: job de fila sabe de qual loja é, sem depender só do telefone ──
+  await ensureColumns(pool, queueTable, {
+    client_id: "VARCHAR(100) DEFAULT NULL",
+  });
   await ensureColumns(pool, agentsTable, {
     persona_name: "VARCHAR(100) DEFAULT NULL",
     persona_role: "VARCHAR(150) DEFAULT NULL",
@@ -662,8 +666,8 @@ async function queueTemplateJob(job) {
   const queueTable = getTableName("queue_jobs");
   const [result] = await pool.execute(
     `INSERT INTO \`${queueTable}\`
-      (automation_id, lead_id, event_name, flow_name, flow_classification, template_name, template_language, template_ref_json, lead_payload_json, context_payload_json, automation_meta_json, scheduled_for, status, attempts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`,
+      (automation_id, lead_id, event_name, flow_name, flow_classification, template_name, template_language, template_ref_json, lead_payload_json, context_payload_json, automation_meta_json, scheduled_for, status, attempts, client_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)`,
     [
       Number(job.automationId || 0),
       Number(job.leadId || 0),
@@ -677,6 +681,7 @@ async function queueTemplateJob(job) {
       JSON.stringify(job.contextPayload || {}),
       JSON.stringify(job.automationMeta || {}),
       job.scheduledFor || nowMysql(),
+      job.tenantId || job.clientId || null,
     ]
   );
 
@@ -922,7 +927,7 @@ async function processQueueJobs(limit = 20) {
         },
       };
 
-      const jobClientId = await getClientIdForPhone(leadPayload.phone);
+      const jobClientId = job.client_id || (await getClientIdForPhone(leadPayload.phone));
       const jobTenant = jobClientId ? await getTenantById(jobClientId) : null;
       const data = await waContext.run(waCredentialsForTenant(jobTenant), () => sendWhatsAppRequest(payload));
       const messageId = data.messages?.[0]?.id || null;
@@ -1211,9 +1216,16 @@ async function sendTextMessagesInSequence(to, chunks) {
 
 async function handleIncomingMessageWithAssistant(message) {
   // ── Persiste a mensagem recebida (texto ou mídia) independente do modo ──
+  // Prioriza o tenant dono do numero que recebeu (deterministico); só cai no
+  // cache por telefone (phone_tenant_map) se esse numero nao tiver tenant
+  // proprio — evita logar a conversa na loja errada quando o mesmo telefone
+  // ja foi visto antes em outro numero/loja.
   if (isMySqlQueueEnabled()) {
     try {
-      const cid = (await getClientIdForPhone(message.from)) || "manual";
+      const cid = (message.receivingPhoneNumberId
+        && (await getTenantByWhatsAppNumber(message.receivingPhoneNumberId))?.client_id)
+        || (await getClientIdForPhone(message.from))
+        || "manual";
       await saveConversationMessage(cid, message.from, "user", buildIncomingMessageBody(message), null);
     } catch (e) {
       addLog("conversation_save_error", "Falha ao salvar mensagem recebida.", { from: message.from, error: e.message });
