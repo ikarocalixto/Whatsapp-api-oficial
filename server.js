@@ -1642,6 +1642,7 @@ async function createMessageTemplate({
   headerText,
   headerExampleHandle,
   allowCategoryChange,
+  components,
 }) {
   const response = await axios.post(
     `${baseUrl}/${wabaId}/message_templates`,
@@ -1650,14 +1651,16 @@ async function createMessageTemplate({
       category,
       language,
       allow_category_change: Boolean(allowCategoryChange),
-      components: buildTemplateComponents({
-        bodyText,
-        footerText,
-        bodyExamples,
-        headerFormat,
-        headerText,
-        headerExampleHandle,
-      }),
+      components: Array.isArray(components)
+        ? components
+        : buildTemplateComponents({
+            bodyText,
+            footerText,
+            bodyExamples,
+            headerFormat,
+            headerText,
+            headerExampleHandle,
+          }),
     },
     {
       headers: {
@@ -3394,6 +3397,80 @@ router.post("/submit-template", async (req, res) => {
     return res.json({ success: true, data });
   } catch (error) {
     addLog("error", "Falha ao enviar template para aprovacao.", error.response?.data || error.message);
+    return res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data || error.message,
+    });
+  }
+});
+
+// Variante de /submit-template que aceita os `components` do template já
+// montados pelo chamador (ex: suporta BUTTONS, que buildTemplateComponents
+// nao monta) — usada pelo Pulse AI.
+router.post("/api/templates/create", async (req, res) => {
+  try {
+    validateConfig();
+
+    const { tenantId, wabaId: requestWabaId, name, category, language = "pt_BR", components, allowCategoryChange = true } = req.body || {};
+
+    if (!name || !category || !Array.isArray(components) || !components.length) {
+      return res.status(400).json({
+        success: false,
+        error: "`name`, `category` e `components` sao obrigatorios.",
+      });
+    }
+
+    const tenant = tenantId ? await getTenantById(tenantId) : null;
+    const wabaId = await waContext.run(waCredentialsForTenant(tenant), () => resolveBusinessAccountId(requestWabaId));
+    if (!wabaId) {
+      return res.status(400).json({
+        success: false,
+        error: "Nao foi possivel descobrir o `wabaId`. Informe manualmente, cadastre o tenant ou configure `WHATSAPP_BUSINESS_ACCOUNT_ID` no .env.",
+      });
+    }
+
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => createMessageTemplate({
+      wabaId, name, category, language, components, allowCategoryChange,
+    }));
+
+    addLog("template_submission", `Template ${name} enviado para aprovacao (Pulse AI).`, { wabaId, category, language, response: data });
+    return res.json({ success: true, ...data });
+  } catch (error) {
+    addLog("error", "Falha ao enviar template para aprovacao (Pulse AI).", error.response?.data || error.message);
+    return res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data || error.message,
+    });
+  }
+});
+
+// Lista templates da loja num formato enxuto {name,status,id,rejected_reason}
+// — usada pelo cron/sync do Pulse AI pra atualizar o status local.
+router.post("/api/templates/sync", async (req, res) => {
+  try {
+    validateConfig();
+
+    const { tenantId, wabaId: requestWabaId } = req.body || {};
+    const tenant = tenantId ? await getTenantById(tenantId) : null;
+    const wabaId = await waContext.run(waCredentialsForTenant(tenant), () => resolveBusinessAccountId(requestWabaId));
+    if (!wabaId) {
+      return res.status(400).json({
+        success: false,
+        error: "Nao foi possivel descobrir o `wabaId`. Cadastre o tenant ou configure `WHATSAPP_BUSINESS_ACCOUNT_ID` no .env.",
+      });
+    }
+
+    const data = await waContext.run(waCredentialsForTenant(tenant), () => listMessageTemplates(wabaId));
+    const templates = (Array.isArray(data?.data) ? data.data : []).map((item) => ({
+      id: item.id,
+      name: item.name,
+      status: item.status,
+      rejected_reason: item.rejected_reason || null,
+    }));
+
+    return res.json({ success: true, templates });
+  } catch (error) {
+    addLog("error", "Falha ao sincronizar templates (Pulse AI).", error.response?.data || error.message);
     return res.status(error.response?.status || 500).json({
       success: false,
       error: error.response?.data || error.message,
